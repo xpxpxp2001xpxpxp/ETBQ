@@ -1,628 +1,460 @@
-# WQN 权重噪声注入的收敛性证明说明
+# WQN 连续步差分噪声的收敛性证明说明
 
 ## 0. 证明对象与边界
 
-本文档只讨论 **WQN（Weight Quantization Noise）权重噪声注入** 的收敛性。完整 ETBQ 框架还包含 AQN 和 SWA，但它们不纳入本证明：
+本文档只讨论 ETBQ 中的权重空间组件，即 **WQN（Weight Quantization Noise）权重噪声注入更新**。完整 ETBQ 还包含 AQN 和 SWA，但它们不纳入本证明：
 
-1. AQN 作用于中间激活，噪声依赖输入样本、网络层和显著性掩码，理论分析需要额外处理数据依赖性与层间耦合；
-2. SWA 是优化后期的参数平均过程，更接近后处理式的轨迹聚合，不是单步 SGD 更新的一部分；
-3. 因此，为保证数学论证干净且可被审稿人接受，本证明只说明：**差分式 WQN 等价于在权重空间中优化一个高斯平滑后的目标函数，并在标准非凸 SGD 假设下收敛到该平滑目标的一阶驻点。**
+1. AQN 作用于中间激活，扰动依赖输入样本、网络层和显著性掩码；
+2. SWA 是优化后期的参数平均过程，不属于单步 SGD 更新；
+3. 因此，本证明只说明：在标准非凸随机优化假设下，WQN 的权重更新收敛到一个权重空间高斯平滑目标的一阶驻点。
 
-证明中还采用一个常见的局部分析设定：在被分析的优化区间内，噪声强度 \(\lambda_e\) 和 WQN 的统计量 \((\boldsymbol{\mu}_w,\boldsymbol{\Sigma}_w)\) 视为固定。实际训练中的 annealing 和 EMA 更新可理解为慢变外部调度，不放入当前定理中。
+需要特别强调的是：这里不使用 fresh-pair 独立同分布差分噪声。本文采用与实际实现一致的连续步差分形式，即当前注入噪声减去上一时刻保留噪声。
 
 ---
 
-## 1. 从权重量化误差出发
+## 1. 权重量化误差的统计建模
 
-设全精度权重为 \(\boldsymbol{W}\)，经过目标比特宽度的模拟量化后得到 \(\hat{\boldsymbol{W}}\)。权重量化误差定义为
+设全精度权重为 \(\boldsymbol{W}\)，模拟量化后的权重为 \(\hat{\boldsymbol{W}}\)。权重量化误差为
 
 \[
 \boldsymbol{E}_w=\hat{\boldsymbol{W}}-\boldsymbol{W}.
 \]
 
-在逐通道权重量化中，同一输出通道共享同一个量化尺度。因此，我们在输出通道粒度上估计误差均值和方差，并将整体权重量化误差建模为
+对于逐通道权重量化，每个输出通道共享一个量化尺度，因此在输出通道粒度上统计误差均值和方差。我们将第 \(t\) 步的权重量化误差样本记为
 
 \[
-\boldsymbol{\delta}\sim\mathcal{N}(\boldsymbol{\mu}_w,\boldsymbol{\Sigma}_w),
+\boldsymbol{\epsilon}_{t}
+\sim
+\mathcal{N}(\boldsymbol{\mu}_{w,t},\boldsymbol{\Sigma}_{w,t}),
 \]
 
-其中 \(\boldsymbol{\mu}_w\) 表示量化误差的均值，\(\boldsymbol{\Sigma}_w\) 表示量化误差协方差。实际实现中通常采用对角协方差近似：
+其中 \(\boldsymbol{\mu}_{w,t}\) 和 \(\boldsymbol{\Sigma}_{w,t}\) 可以随训练进程、权重状态和 EMA 统计缓慢变化。若显式考虑噪声强度退火系数 \(\lambda_e\)，实际注入噪声写作
 
 \[
-\boldsymbol{\Sigma}_w=\mathrm{diag}(\boldsymbol{\sigma}_w^2).
+\boldsymbol{\delta}_{t}
+=
+\lambda_e \boldsymbol{\epsilon}_{t}.
 \]
 
-这里最重要的一点是：\(\boldsymbol{\mu}_w\) 一般并不严格等于零。如果直接向权重中注入
-
-\[
-\boldsymbol{\delta}_t\sim\mathcal{N}(\boldsymbol{\mu}_w,\boldsymbol{\Sigma}_w),
-\]
-
-则有
-
-\[
-\mathbb{E}[\boldsymbol{\delta}_t]=\boldsymbol{\mu}_w.
-\]
-
-这意味着每一步都会把权重系统性地推向某个非零方向，从优化角度看会产生持续的均值漂移。因此，朴素加性噪声并不是一个干净的无偏扰动。
+因此，\(\boldsymbol{\delta}_{t}\) 与 \(\boldsymbol{\delta}_{t-1}\) 一般不应被视为独立同分布样本；它们的均值和方差都可能不同。
 
 ---
 
-## 2. 差分式 WQN：消除均值漂移
+## 2. 连续步差分式 WQN
 
-WQN 的关键设计是用两个同分布的量化误差样本构造差分扰动。令
-
-\[
-\boldsymbol{\delta}_{t}^{+},\boldsymbol{\delta}_{t}^{-}
-\overset{i.i.d.}{\sim}
-\mathcal{N}(\boldsymbol{\mu}_w,\boldsymbol{\Sigma}_w).
-\]
-
-定义差分权重噪声为
+WQN 的实际机制不是每一步直接把 \(\boldsymbol{\delta}_{t}\) 加到物理权重上，而是将当前噪声替换上一时刻噪声。令 \(\widetilde{\boldsymbol{W}}_t\) 表示第 \(t\) 步前的物理可训练权重，则临时评估权重为
 
 \[
-\boldsymbol{\zeta}_t
+\boldsymbol{W}'_t
 =
-\lambda_e(\boldsymbol{\delta}_{t}^{+}-\boldsymbol{\delta}_{t}^{-}),
+\widetilde{\boldsymbol{W}}_t+\boldsymbol{P}_t,
 \]
 
-其中 \(\lambda_e\in[0,1]\) 是当前 epoch 的噪声强度系数。
-
-### 2.1 零均值性质
-
-由期望的线性性可得
+其中差分扰动为
 
 \[
-\begin{aligned}
-\mathbb{E}[\boldsymbol{\zeta}_t]
-&=
-\lambda_e
-\left(
-\mathbb{E}[\boldsymbol{\delta}_{t}^{+}]
+\boldsymbol{P}_t
+=
+\boldsymbol{\delta}_{t}-\boldsymbol{\delta}_{t-1}.
+\]
+
+这与实现一致：模型保存上一时刻已注入的权重噪声，在下一次前向传播时只添加“新噪声 - 旧噪声”的差值。
+
+### 2.1 轨迹平均漂移消失
+
+由于 \(\boldsymbol{\delta}_{t}\) 和 \(\boldsymbol{\delta}_{t-1}\) 的统计量可能不同，一般不能断言
+
+\[
+\mathbb{E}[\boldsymbol{P}_t]=\mathbf{0}.
+\]
+
+事实上，
+
+\[
+\mathbb{E}[\boldsymbol{P}_t]
+=
+\mathbb{E}[\boldsymbol{\delta}_{t}]
 -
-\mathbb{E}[\boldsymbol{\delta}_{t}^{-}]
-\right)\\
-&=
-\lambda_e(\boldsymbol{\mu}_w-\boldsymbol{\mu}_w)\\
-&=\mathbf{0}.
-\end{aligned}
+\mathbb{E}[\boldsymbol{\delta}_{t-1}].
 \]
 
-因此，差分 WQN 严格消除了非零量化误差均值带来的漂移。
-
-### 2.2 协方差性质
-
-由于 \(\boldsymbol{\delta}_{t}^{+}\) 与 \(\boldsymbol{\delta}_{t}^{-}\) 独立同分布，
+但沿整个训练轨迹求平均时，差分项形成望远镜求和：
 
 \[
 \begin{aligned}
-\mathrm{Cov}(\boldsymbol{\zeta}_t)
+\frac{1}{T}\sum_{t=1}^{T}
+\mathbb{E}[\boldsymbol{P}_t]
 &=
-\lambda_e^2
-\mathrm{Cov}(\boldsymbol{\delta}_{t}^{+}-\boldsymbol{\delta}_{t}^{-})\\
+\frac{1}{T}\sum_{t=1}^{T}
+\mathbb{E}[
+\boldsymbol{\delta}_{t}
+-
+\boldsymbol{\delta}_{t-1}
+]\\
 &=
-\lambda_e^2
-\left(
-\mathrm{Cov}(\boldsymbol{\delta}_{t}^{+})
-+
-\mathrm{Cov}(\boldsymbol{\delta}_{t}^{-})
-\right)\\
-&=
-2\lambda_e^2\boldsymbol{\Sigma}_w.
+\frac{
+\mathbb{E}[\boldsymbol{\delta}_{T}]
+-
+\mathbb{E}[\boldsymbol{\delta}_{0}]
+}{T}.
 \end{aligned}
 \]
 
-所以，WQN 并没有抹掉量化误差的方向结构。它保留了由 \(\boldsymbol{\Sigma}_w\) 描述的方差方向，只是把非零均值去掉。直观地说：WQN 不再让权重被平均误差推走，而是让权重反复经历与真实量化误差方差一致的局部扰动。
+如果量化噪声均值有界，即存在常数 \(M_\delta\)，使得
+
+\[
+\|\mathbb{E}[\boldsymbol{\delta}_{t}]\|\leq M_\delta,
+\]
+
+则
+
+\[
+\left\|
+\frac{1}{T}\sum_{t=1}^{T}
+\mathbb{E}[\boldsymbol{P}_t]
+\right\|
+\leq
+\frac{2M_\delta}{T}
+\rightarrow 0.
+\]
+
+这说明 WQN 的差分扰动并非逐步严格无偏，而是在 **轨迹平均意义下漂移消失**。这比朴素加性噪声更稳定，因为朴素加性噪声会持续把权重推向量化误差均值方向。
 
 ---
 
-## 3. WQN 对应的平滑目标函数
+## 3. WQN 对应的平滑目标
 
-令原始训练损失为
-
-\[
-\mathcal{L}(\boldsymbol{W}).
-\]
-
-WQN 在每一步不是直接在 \(\boldsymbol{W}_t\) 处计算梯度，而是在扰动点
+令权重空间中的高斯平滑目标为
 
 \[
-\boldsymbol{W}_t+\boldsymbol{\zeta}_t
-\]
-
-处计算梯度。因此，WQN 实际对应的目标不是原始损失，而是下面的权重空间平滑目标：
-
-\[
-\mathcal{L}_{\sigma}^{wqn}(\boldsymbol{W})
+\mathcal{L}_{\sigma}(\boldsymbol{W})
 =
-\mathbb{E}_{\boldsymbol{\zeta}}
+\mathbb{E}_{\boldsymbol{\delta}}
 \left[
-\mathcal{L}(\boldsymbol{W}+\boldsymbol{\zeta})
+\mathcal{L}(\boldsymbol{W}+\boldsymbol{\delta})
 \right],
 \]
 
-其中
+其中 \(\boldsymbol{\delta}\) 表示有效的权重量化扰动。
 
-\[
-\boldsymbol{\zeta}\sim
-\mathcal{N}(\mathbf{0},2\lambda_e^2\boldsymbol{\Sigma}_w).
-\]
+由于实际的连续步差分噪声具有轻微的局部偏差，我们不声称每一步都严格满足无偏梯度。相反，我们采用一个标准的、可处理的分析假设：由 WQN 诱导的随机梯度可以理想化为平滑目标梯度的条件无偏估计，并具有有界方差。
 
-这个式子的含义非常重要：WQN 并不是在优化单点损失 \(\mathcal{L}(\boldsymbol{W})\)，而是在优化权重附近一片由量化误差分布决定的邻域平均损失。若某个解只在一个极窄位置损失很低，但稍微受到量化扰动后损失急剧升高，那么它在 \(\mathcal{L}_{\sigma}^{wqn}\) 下不会是一个好解。反之，若某个解附近足够平坦，则它的扰动平均损失仍然较低。
-
----
-
-## 4. WQN 的隐式 Hessian Trace 正则化
-
-为了说明 WQN 为什么会鼓励平坦极小值，对
-
-\[
-\mathcal{L}(\boldsymbol{W}+\boldsymbol{\zeta})
-\]
-
-在 \(\boldsymbol{W}\) 附近做二阶 Taylor 展开：
-
-\[
-\mathcal{L}(\boldsymbol{W}+\boldsymbol{\zeta})
-\approx
-\mathcal{L}(\boldsymbol{W})
-+
-\nabla \mathcal{L}(\boldsymbol{W})^{\top}\boldsymbol{\zeta}
-+
-\frac{1}{2}
-\boldsymbol{\zeta}^{\top}
-\boldsymbol{H}_w
-\boldsymbol{\zeta},
-\]
-
-其中
-
-\[
-\boldsymbol{H}_w=\nabla^2\mathcal{L}(\boldsymbol{W})
-\]
-
-是损失函数关于权重的 Hessian 矩阵。
-
-对 \(\boldsymbol{\zeta}\) 取期望。由于 \(\mathbb{E}[\boldsymbol{\zeta}]=\mathbf{0}\)，一阶项消失：
-
-\[
-\mathbb{E}
-\left[
-\nabla \mathcal{L}(\boldsymbol{W})^{\top}\boldsymbol{\zeta}
-\right]
-=
-\nabla \mathcal{L}(\boldsymbol{W})^{\top}
-\mathbb{E}[\boldsymbol{\zeta}]
-=0.
-\]
-
-二阶项满足
-
-\[
-\mathbb{E}
-\left[
-\boldsymbol{\zeta}^{\top}\boldsymbol{H}_w\boldsymbol{\zeta}
-\right]
-=
-\mathrm{Tr}
-\left(
-\boldsymbol{H}_w
-\mathbb{E}[\boldsymbol{\zeta}\boldsymbol{\zeta}^{\top}]
-\right).
-\]
-
-又因为
-
-\[
-\mathbb{E}[\boldsymbol{\zeta}\boldsymbol{\zeta}^{\top}]
-=
-\mathrm{Cov}(\boldsymbol{\zeta})
-=
-2\lambda_e^2\boldsymbol{\Sigma}_w,
-\]
-
-所以
-
-\[
-\begin{aligned}
-\mathcal{L}_{\sigma}^{wqn}(\boldsymbol{W})
-&=
-\mathbb{E}_{\boldsymbol{\zeta}}
-\left[
-\mathcal{L}(\boldsymbol{W}+\boldsymbol{\zeta})
-\right]\\
-&\approx
-\mathcal{L}(\boldsymbol{W})
-+
-\frac{1}{2}
-\mathrm{Tr}
-\left(
-\boldsymbol{H}_w
-\cdot
-2\lambda_e^2\boldsymbol{\Sigma}_w
-\right)\\
-&=
-\mathcal{L}(\boldsymbol{W})
-+
-\lambda_e^2
-\mathrm{Tr}
-\left(
-\boldsymbol{H}_w\boldsymbol{\Sigma}_w
-\right).
-\end{aligned}
-\]
-
-这说明 WQN 的优化目标近似等价于
-
-\[
-\boxed{
-\mathcal{L}_{\sigma}^{wqn}(\boldsymbol{W})
-\approx
-\mathcal{L}(\boldsymbol{W})
-+
-\lambda_e^2
-\mathrm{Tr}
-(\boldsymbol{H}_w\boldsymbol{\Sigma}_w)
-}
-\]
-
-这不是普通的均匀平坦化，而是 **量化误差对齐的平坦化**：
-
-- 如果某个权重方向的量化误差方差大，即 \(\boldsymbol{\Sigma}_w\) 在该方向上较大，那么该方向的曲率会受到更强惩罚；
-- 如果某个方向量化误差很小，则该方向无需过度平坦化；
-- 因此 WQN 学到的是与目标量化网格相匹配的平坦极小值。
-
----
-
-## 5. 收敛性证明所需假设
-
-下面给出标准非凸 SGD 证明框架中的三个假设。
-
-### 假设 1：平滑目标的梯度 Lipschitz 连续
-
-存在常数 \(L_\sigma>0\)，使得对任意 \(\boldsymbol{W}_1,\boldsymbol{W}_2\)，有
-
-\[
-\left\|
-\nabla \mathcal{L}_{\sigma}^{wqn}(\boldsymbol{W}_1)
--
-\nabla \mathcal{L}_{\sigma}^{wqn}(\boldsymbol{W}_2)
-\right\|
-\leq
-L_\sigma
-\left\|
-\boldsymbol{W}_1-\boldsymbol{W}_2
-\right\|.
-\]
-
-这是假设平滑目标足够光滑。它是非凸 SGD 收敛分析的基本条件。
-
-### 假设 2：平滑目标存在下界
-
-存在有限常数 \(\mathcal{L}_{\sigma}^{wqn,*}\)，使得
-
-\[
-\mathcal{L}_{\sigma}^{wqn}(\boldsymbol{W})
-\geq
-\mathcal{L}_{\sigma}^{wqn,*}.
-\]
-
-对于交叉熵损失，损失非负，因此该假设自然成立。
-
-### 假设 3：随机梯度无偏且方差有界
-
-定义
+记
 
 \[
 \boldsymbol{g}_t
 =
-\nabla
-\mathcal{L}_{\sigma}^{wqn}
-(\boldsymbol{W}_t).
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t),
 \]
-
-WQN 使用的随机梯度为
 
 \[
 \tilde{\boldsymbol{g}}_t
-=
-\nabla
-\mathcal{L}
-(\boldsymbol{W}_t+\boldsymbol{\zeta}_t;\xi_t),
 \]
 
-其中 \(\xi_t\) 表示 mini-batch 随机性。假设
+为第 \(t\) 步使用的随机梯度。我们采用如下分析假设：
 
 \[
-\mathbb{E}
-\left[
-\tilde{\boldsymbol{g}}_t
-\mid
-\boldsymbol{W}_t
-\right]
+\mathbb{E}_t[\tilde{\boldsymbol{g}}_t]
 =
 \boldsymbol{g}_t,
 \]
 
-并且存在常数 \(\sigma_w^2\)，使得
+并且存在常数 \(\sigma_{\mathrm{eff}}^2\)，使得
 
 \[
-\mathbb{E}
+\mathbb{E}_t
 \left[
-\left\|
+\|
 \tilde{\boldsymbol{g}}_t-\boldsymbol{g}_t
-\right\|^2
-\mid
-\boldsymbol{W}_t
+\|^2
 \right]
 \leq
-\sigma_w^2.
+\sigma_{\mathrm{eff}}^2.
 \]
 
-这里的方差包含两部分：mini-batch SGD 的采样噪声，以及 WQN 差分噪声本身带来的采样噪声。
+这里 \(\mathbb{E}_t[\cdot]\) 表示给定历史信息 \(\mathcal{F}_t\) 后的条件期望。这个假设由前述轨迹平均漂移消失所动机化，但不是由望远镜求和严格推出。
 
 ---
 
-## 6. 定理：WQN 的非凸收敛性
+## 4. 假设条件
 
-若假设 1--3 成立，并且 WQN 更新为
+### 假设 1：梯度 Lipschitz 连续
+
+平滑目标 \(\mathcal{L}_{\sigma}\) 满足 \(L_{\sigma}\)-smooth：
+
+\[
+\|
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_1)
+-
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_2)
+\|
+\leq
+L_{\sigma}
+\|
+\boldsymbol{W}_1-\boldsymbol{W}_2
+\|.
+\]
+
+这是非凸随机优化中的标准假设。高斯平滑可以缓解量化扰动带来的局部非光滑性，从而为该假设提供动机。
+
+### 假设 2：目标函数有下界
+
+存在常数 \(\mathcal{L}_{\sigma}^{*}>-\infty\)，使得
+
+\[
+\mathcal{L}_{\sigma}(\boldsymbol{W})
+\geq
+\mathcal{L}_{\sigma}^{*}.
+\]
+
+对于交叉熵训练，损失非负，因此该假设自然成立。
+
+### 假设 3：理想化条件无偏与有界方差
+
+如上所述，我们假设
+
+\[
+\mathbb{E}_t[\tilde{\boldsymbol{g}}_t]
+=
+\boldsymbol{g}_t,
+\qquad
+\mathbb{E}_t
+\left[
+\|
+\tilde{\boldsymbol{g}}_t-\boldsymbol{g}_t
+\|^2
+\right]
+\leq
+\sigma_{\mathrm{eff}}^2.
+\]
+
+---
+
+## 5. 收敛定理
+
+**定理。** 在假设 1--3 下，若 WQN 权重更新由 SGD 产生：
 
 \[
 \boldsymbol{W}_{t+1}
 =
-\boldsymbol{W}_t
--
-\eta
-\tilde{\boldsymbol{g}}_t,
+\boldsymbol{W}_t-\eta\tilde{\boldsymbol{g}}_t,
 \]
 
-学习率满足
+且学习率满足
 
 \[
-\eta\leq\frac{1}{L_\sigma},
+\eta\leq \frac{1}{L_{\sigma}},
 \]
 
 则有
 
 \[
-\boxed{
 \frac{1}{T}
 \sum_{t=1}^{T}
 \mathbb{E}
 \left[
-\left\|
-\nabla
-\mathcal{L}_{\sigma}^{wqn}
-(\boldsymbol{W}_t)
-\right\|^2
+\|
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t)
+\|^2
 \right]
 \leq
 \frac{
-2
-\left(
-\mathcal{L}_{\sigma}^{wqn}(\boldsymbol{W}_1)
--
-\mathcal{L}_{\sigma}^{wqn,*}
-\right)
+2(\mathcal{L}_{\sigma}(\boldsymbol{W}_1)-\mathcal{L}_{\sigma}^{*})
 }{
 \eta T
 }
 +
-\eta L_\sigma\sigma_w^2
-}
+\eta L_{\sigma}\sigma_{\mathrm{eff}}^2.
 \]
 
-这个结论说明：WQN 会收敛到平滑目标 \(\mathcal{L}_{\sigma}^{wqn}\) 的一阶驻点附近。若采用递减学习率，例如 \(\eta=\mathcal{O}(1/\sqrt{T})\)，右侧会随 \(T\) 增大而下降，从而得到标准意义上的非凸 SGD 收敛。
-
----
-
-## 7. 逐步证明
-
-为简化记号，令
+进一步，若取 horizon-dependent constant stepsize：
 
 \[
-\mathcal{F}(\boldsymbol{W})
-=
-\mathcal{L}_{\sigma}^{wqn}(\boldsymbol{W}),
-\qquad
-\boldsymbol{g}_t
-=
-\nabla
-\mathcal{F}
-(\boldsymbol{W}_t).
-\]
-
-### 第一步：使用下降引理
-
-由于 \(\mathcal{F}\) 是 \(L_\sigma\)-smooth 的，对于更新
-
-\[
-\boldsymbol{W}_{t+1}
-=
-\boldsymbol{W}_t
--
-\eta\tilde{\boldsymbol{g}}_t,
-\]
-
-下降引理给出
-
-\[
-\mathcal{F}(\boldsymbol{W}_{t+1})
-\leq
-\mathcal{F}(\boldsymbol{W}_t)
-+
-\left\langle
-\boldsymbol{g}_t,
-\boldsymbol{W}_{t+1}-\boldsymbol{W}_t
-\right\rangle
-+
-\frac{L_\sigma}{2}
-\left\|
-\boldsymbol{W}_{t+1}-\boldsymbol{W}_t
-\right\|^2.
-\]
-
-代入
-
-\[
-\boldsymbol{W}_{t+1}-\boldsymbol{W}_t
-=
--
-\eta\tilde{\boldsymbol{g}}_t,
-\]
-
-得到
-
-\[
-\mathcal{F}(\boldsymbol{W}_{t+1})
-\leq
-\mathcal{F}(\boldsymbol{W}_t)
--
 \eta
-\left\langle
-\boldsymbol{g}_t,
-\tilde{\boldsymbol{g}}_t
-\right\rangle
-+
-\frac{L_\sigma\eta^2}{2}
-\left\|
-\tilde{\boldsymbol{g}}_t
-\right\|^2.
-\]
-
-### 第二步：对随机性取条件期望
-
-对 \(\boldsymbol{W}_t\) 条件下取期望，并使用无偏性
-
-\[
-\mathbb{E}
-\left[
-\tilde{\boldsymbol{g}}_t
-\mid
-\boldsymbol{W}_t
-\right]
 =
-\boldsymbol{g}_t,
+\min
+\left\{
+\frac{1}{L_{\sigma}},
+\frac{c}{\sqrt{T}}
+\right\},
 \]
 
-可得
+则右端为
 
 \[
-\mathbb{E}
-\left[
-\left\langle
-\boldsymbol{g}_t,
-\tilde{\boldsymbol{g}}_t
-\right\rangle
-\mid
-\boldsymbol{W}_t
-\right]
-=
-\left\|
-\boldsymbol{g}_t
-\right\|^2.
-\]
-
-同时，由方差有界假设，
-
-\[
-\begin{aligned}
-\mathbb{E}
-\left[
-\left\|
-\tilde{\boldsymbol{g}}_t
-\right\|^2
-\mid
-\boldsymbol{W}_t
-\right]
-&=
-\left\|
-\boldsymbol{g}_t
-\right\|^2
-+
-\mathbb{E}
-\left[
-\left\|
-\tilde{\boldsymbol{g}}_t-\boldsymbol{g}_t
-\right\|^2
-\mid
-\boldsymbol{W}_t
-\right]\\
-&\leq
-\left\|
-\boldsymbol{g}_t
-\right\|^2
-+
-\sigma_w^2.
-\end{aligned}
+\mathcal{O}\left(\frac{1}{\sqrt{T}}\right),
 \]
 
 因此
 
 \[
-\begin{aligned}
+\lim_{T\rightarrow\infty}
+\frac{1}{T}
+\sum_{t=1}^{T}
 \mathbb{E}
 \left[
-\mathcal{F}(\boldsymbol{W}_{t+1})
+\|
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t)
+\|^2
 \right]
-&\leq
-\mathbb{E}
-\left[
-\mathcal{F}(\boldsymbol{W}_t)
-\right]
--
-\eta
-\mathbb{E}
-\left[
-\left\|
-\boldsymbol{g}_t
-\right\|^2
-\right]\\
-&\quad
-+
-\frac{L_\sigma\eta^2}{2}
-\mathbb{E}
-\left[
-\left\|
-\boldsymbol{g}_t
-\right\|^2
-+
-\sigma_w^2
-\right]\\
-&=
-\mathbb{E}
-\left[
-\mathcal{F}(\boldsymbol{W}_t)
-\right]
--
-\eta
-\left(
-1-\frac{L_\sigma\eta}{2}
-\right)
-\mathbb{E}
-\left[
-\left\|
-\boldsymbol{g}_t
-\right\|^2
-\right]
-+
-\frac{L_\sigma\eta^2}{2}
-\sigma_w^2.
-\end{aligned}
+=0.
 \]
 
-### 第三步：使用学习率条件
+---
 
-因为
+## 6. 证明
+
+由 \(L_{\sigma}\)-smoothness，对任意一步更新有下降引理：
 
 \[
-\eta\leq\frac{1}{L_\sigma},
+\mathcal{L}_{\sigma}(\boldsymbol{W}_{t+1})
+\leq
+\mathcal{L}_{\sigma}(\boldsymbol{W}_t)
++
+\langle
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t),
+\boldsymbol{W}_{t+1}-\boldsymbol{W}_t
+\rangle
++
+\frac{L_{\sigma}}{2}
+\|
+\boldsymbol{W}_{t+1}-\boldsymbol{W}_t
+\|^2.
+\]
+
+代入 SGD 更新
+
+\[
+\boldsymbol{W}_{t+1}-\boldsymbol{W}_t
+=
+-\eta\tilde{\boldsymbol{g}}_t,
+\]
+
+得到
+
+\[
+\mathcal{L}_{\sigma}(\boldsymbol{W}_{t+1})
+\leq
+\mathcal{L}_{\sigma}(\boldsymbol{W}_t)
+-
+\eta
+\langle
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t),
+\tilde{\boldsymbol{g}}_t
+\rangle
++
+\frac{L_{\sigma}\eta^2}{2}
+\|
+\tilde{\boldsymbol{g}}_t
+\|^2.
+\]
+
+对历史 \(\mathcal{F}_t\) 条件取期望。由于
+
+\[
+\mathbb{E}_t[\tilde{\boldsymbol{g}}_t]
+=
+\boldsymbol{g}_t
+=
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t),
 \]
 
 所以
 
 \[
-1-\frac{L_\sigma\eta}{2}
+\mathbb{E}_t
+\left[
+\langle
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t),
+\tilde{\boldsymbol{g}}_t
+\rangle
+\right]
+=
+\|
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t)
+\|^2.
+\]
+
+同时，由二阶矩分解：
+
+\[
+\begin{aligned}
+\mathbb{E}_t
+\left[
+\|
+\tilde{\boldsymbol{g}}_t
+\|^2
+\right]
+&=
+\mathbb{E}_t
+\left[
+\|
+\tilde{\boldsymbol{g}}_t-\boldsymbol{g}_t+\boldsymbol{g}_t
+\|^2
+\right]\\
+&=
+\mathbb{E}_t
+\left[
+\|
+\tilde{\boldsymbol{g}}_t-\boldsymbol{g}_t
+\|^2
+\right]
++
+\|
+\boldsymbol{g}_t
+\|^2\\
+&\leq
+\sigma_{\mathrm{eff}}^2
++
+\|
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t)
+\|^2.
+\end{aligned}
+\]
+
+代回下降不等式：
+
+\[
+\begin{aligned}
+\mathbb{E}_t[
+\mathcal{L}_{\sigma}(\boldsymbol{W}_{t+1})
+]
+&\leq
+\mathcal{L}_{\sigma}(\boldsymbol{W}_t)
+-
+\eta
+\|
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t)
+\|^2\\
+&\quad+
+\frac{L_{\sigma}\eta^2}{2}
+\left(
+\|
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t)
+\|^2
++
+\sigma_{\mathrm{eff}}^2
+\right)\\
+&=
+\mathcal{L}_{\sigma}(\boldsymbol{W}_t)
+-
+\eta
+\left(
+1-\frac{L_{\sigma}\eta}{2}
+\right)
+\|
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t)
+\|^2
++
+\frac{L_{\sigma}\eta^2}{2}
+\sigma_{\mathrm{eff}}^2.
+\end{aligned}
+\]
+
+当 \(\eta\leq 1/L_{\sigma}\) 时，
+
+\[
+1-\frac{L_{\sigma}\eta}{2}
 \geq
 \frac{1}{2}.
 \]
@@ -630,56 +462,22 @@ WQN 使用的随机梯度为
 因此
 
 \[
-\mathbb{E}
-\left[
-\mathcal{F}(\boldsymbol{W}_{t+1})
-\right]
-\leq
-\mathbb{E}
-\left[
-\mathcal{F}(\boldsymbol{W}_t)
-\right]
--
 \frac{\eta}{2}
-\mathbb{E}
-\left[
-\left\|
-\boldsymbol{g}_t
-\right\|^2
-\right]
+\|
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t)
+\|^2
+\leq
+\mathcal{L}_{\sigma}(\boldsymbol{W}_t)
+-
+\mathbb{E}_t[
+\mathcal{L}_{\sigma}(\boldsymbol{W}_{t+1})
+]
 +
-\frac{L_\sigma\eta^2}{2}
-\sigma_w^2.
+\frac{L_{\sigma}\eta^2}{2}
+\sigma_{\mathrm{eff}}^2.
 \]
 
-移项得到
-
-\[
-\frac{\eta}{2}
-\mathbb{E}
-\left[
-\left\|
-\boldsymbol{g}_t
-\right\|^2
-\right]
-\leq
-\mathbb{E}
-\left[
-\mathcal{F}(\boldsymbol{W}_t)
-\right]
--
-\mathbb{E}
-\left[
-\mathcal{F}(\boldsymbol{W}_{t+1})
-\right]
-+
-\frac{L_\sigma\eta^2}{2}
-\sigma_w^2.
-\]
-
-### 第四步：对整个训练过程求和
-
-对 \(t=1,\ldots,T\) 求和：
+对全随机性取期望，并从 \(t=1\) 到 \(T\) 求和：
 
 \[
 \begin{aligned}
@@ -687,158 +485,70 @@ WQN 使用的随机梯度为
 \sum_{t=1}^{T}
 \mathbb{E}
 \left[
-\left\|
-\boldsymbol{g}_t
-\right\|^2
+\|
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t)
+\|^2
 \right]
 &\leq
 \sum_{t=1}^{T}
 \left(
-\mathbb{E}[\mathcal{F}(\boldsymbol{W}_t)]
+\mathbb{E}[
+\mathcal{L}_{\sigma}(\boldsymbol{W}_t)
+]
 -
-\mathbb{E}[\mathcal{F}(\boldsymbol{W}_{t+1})]
+\mathbb{E}[
+\mathcal{L}_{\sigma}(\boldsymbol{W}_{t+1})
+]
 \right)\\
-&\quad
+&\quad+
+\frac{L_{\sigma}\eta^2T}{2}
+\sigma_{\mathrm{eff}}^2\\
+&=
+\mathcal{L}_{\sigma}(\boldsymbol{W}_1)
+-
+\mathbb{E}[
+\mathcal{L}_{\sigma}(\boldsymbol{W}_{T+1})
+]
 +
-\frac{L_\sigma\eta^2T}{2}\sigma_w^2.
+\frac{L_{\sigma}\eta^2T}{2}
+\sigma_{\mathrm{eff}}^2\\
+&\leq
+\mathcal{L}_{\sigma}(\boldsymbol{W}_1)
+-
+\mathcal{L}_{\sigma}^{*}
++
+\frac{L_{\sigma}\eta^2T}{2}
+\sigma_{\mathrm{eff}}^2.
 \end{aligned}
 \]
 
-中间的损失项发生望远镜相消：
-
-\[
-\sum_{t=1}^{T}
-\left(
-\mathbb{E}[\mathcal{F}(\boldsymbol{W}_t)]
--
-\mathbb{E}[\mathcal{F}(\boldsymbol{W}_{t+1})]
-\right)
-=
-\mathcal{F}(\boldsymbol{W}_1)
--
-\mathbb{E}
-\left[
-\mathcal{F}(\boldsymbol{W}_{T+1})
-\right].
-\]
-
-由下界假设，
-
-\[
-\mathbb{E}
-\left[
-\mathcal{F}(\boldsymbol{W}_{T+1})
-\right]
-\geq
-\mathcal{L}_{\sigma}^{wqn,*}.
-\]
-
-所以
-
-\[
-\frac{\eta}{2}
-\sum_{t=1}^{T}
-\mathbb{E}
-\left[
-\left\|
-\boldsymbol{g}_t
-\right\|^2
-\right]
-\leq
-\mathcal{L}_{\sigma}^{wqn}(\boldsymbol{W}_1)
--
-\mathcal{L}_{\sigma}^{wqn,*}
-+
-\frac{L_\sigma\eta^2T}{2}
-\sigma_w^2.
-\]
-
-两边同除以 \(\eta T/2\)，得到
+两边同时除以 \(\eta T/2\)，得到
 
 \[
 \frac{1}{T}
 \sum_{t=1}^{T}
 \mathbb{E}
 \left[
-\left\|
-\boldsymbol{g}_t
-\right\|^2
+\|
+\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t)
+\|^2
 \right]
 \leq
 \frac{
-2
-\left(
-\mathcal{L}_{\sigma}^{wqn}(\boldsymbol{W}_1)
--
-\mathcal{L}_{\sigma}^{wqn,*}
-\right)
+2(\mathcal{L}_{\sigma}(\boldsymbol{W}_1)-\mathcal{L}_{\sigma}^{*})
 }{
 \eta T
 }
 +
-\eta L_\sigma\sigma_w^2.
+\eta L_{\sigma}\sigma_{\mathrm{eff}}^2.
 \]
 
-由于
-
-\[
-\boldsymbol{g}_t
-=
-\nabla
-\mathcal{L}_{\sigma}^{wqn}
-(\boldsymbol{W}_t),
-\]
-
-最终得到
-
-\[
-\boxed{
-\frac{1}{T}
-\sum_{t=1}^{T}
-\mathbb{E}
-\left[
-\left\|
-\nabla
-\mathcal{L}_{\sigma}^{wqn}
-(\boldsymbol{W}_t)
-\right\|^2
-\right]
-\leq
-\frac{
-2
-\left(
-\mathcal{L}_{\sigma}^{wqn}(\boldsymbol{W}_1)
--
-\mathcal{L}_{\sigma}^{wqn,*}
-\right)
-}{
-\eta T
-}
-+
-\eta L_\sigma\sigma_w^2
-}
-\]
-
-证毕。
+证明完毕。
 
 ---
 
-## 8. 这个定理真正说明了什么
+## 7. 直观解释
 
-该定理的含义可以概括为三点。
+该证明说明，在 WQN 的连续步差分机制下，只要差分扰动的轨迹平均漂移被控制，并且由此诱导的随机梯度可以在分析中视为平滑目标的条件无偏估计，那么 WQN 的权重更新满足标准非凸 SGD 的一阶收敛界。
 
-第一，WQN 的差分噪声是严格零均值的，因此它不会像朴素加性量化噪声那样把优化过程持续推向某个偏移方向。
-
-第二，WQN 优化的并不是原始尖锐损失 \(\mathcal{L}(\boldsymbol{W})\)，而是量化误差分布平滑后的目标 \(\mathcal{L}_{\sigma}^{wqn}(\boldsymbol{W})\)。因此，WQN 自然偏好在量化扰动下仍然稳定的权重区域。
-
-第三，二阶展开说明 WQN 等价于引入
-
-\[
-\lambda_e^2
-\mathrm{Tr}
-(\boldsymbol{H}_w\boldsymbol{\Sigma}_w)
-\]
-
-这一 Hessian trace 正则项。它惩罚的不是所有方向的曲率，而是与实际权重量化误差方差 \(\boldsymbol{\Sigma}_w\) 对齐的方向曲率。因此，WQN 所寻找的是 **量化误差对齐的平坦极小值**。
-
-这正是 ETBQ 的核心思想：在 PTQ 之前，让全精度模型先迁移到一个能够吸收低比特权重量化扰动的宽广盆地中，从而为后续 PTQ 提供更稳定、更鲁棒的起点。
+直观上，WQN 的作用不是让每一步噪声严格零均值，而是防止量化噪声在训练轨迹上持续累积成系统性漂移。望远镜求和保证了长期平均扰动不会把优化器推离稳定区域；而高斯平滑目标则鼓励模型寻找对权重量化扰动不敏感的平坦区域。

@@ -146,47 +146,45 @@ WQN 是论文最关键的方法创新之一。原稿中有正确方向，但符�
 
 **修改内容**
 
-- 根据后续讨论，将附录进一步收窄为 **WQN-only** 收敛性证明；AQN 和 SWA 不再放入该定理中。
-- 将差分权重噪声定义为两个同分布权重量化误差样本之差：
+- 将附录定位为 **WQN Update** 的收敛性分析，即 ETBQ 的权重空间组件；AQN 和 SWA 不纳入该定理。
+- 删除 fresh-pair 独立同分布噪声建模，改回与实现一致的连续步差分扰动：
   \[
-  \boldsymbol{\zeta}_t=\lambda_e(\boldsymbol{\delta}_t^+-\boldsymbol{\delta}_t^-),
-  \quad
-  \boldsymbol{\delta}_t^+,\boldsymbol{\delta}_t^-\overset{i.i.d.}{\sim}
-  \mathcal{N}(\boldsymbol{\mu}_w,\boldsymbol{\Sigma}_w).
+  \boldsymbol{P}_t=\boldsymbol{\delta}_t-\boldsymbol{\delta}_{t-1}.
   \]
-  因而有
+- 保留差分项的望远镜求和性质：
   \[
-  \mathbb{E}[\boldsymbol{\zeta}_t]=\mathbf{0},
-  \qquad
-  \mathrm{Cov}(\boldsymbol{\zeta}_t)=2\lambda_e^2\boldsymbol{\Sigma}_w.
-  \]
-- 将 WQN 平滑目标定义为：
-  \[
-  \mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W})
+  \frac{1}{T}\sum_{t=1}^{T}\mathbb{E}[\boldsymbol{P}_t]
   =
-  \mathbb{E}_{\boldsymbol{\zeta}}
-  [\mathcal{L}(\boldsymbol{W}+\boldsymbol{\zeta})].
+  \frac{\mathbb{E}[\boldsymbol{\delta}_{T}]
+  -\mathbb{E}[\boldsymbol{\delta}_{0}]}{T}
+  \rightarrow \mathbf{0}.
   \]
-- 收敛定理改为：
+- 明确说明上述性质只能支持“轨迹平均漂移受控”的直觉，因此附录采用理想化条件无偏假设，而不是声称每一步严格无偏。
+- 将平滑目标统一为：
+  \[
+  \mathcal{L}_{\sigma}(\boldsymbol{W})
+  =
+  \mathbb{E}_{\boldsymbol{\delta}}
+  [\mathcal{L}(\boldsymbol{W}+\boldsymbol{\delta})].
+  \]
+- 收敛定理统一为：
   \[
   \frac{1}{T}\sum_{t=1}^{T}\mathbb{E}
-  \|\nabla \mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}_t)\|^2
+  \|\nabla \mathcal{L}_{\sigma}(\boldsymbol{W}_t)\|^2
   \leq
-  \frac{2(\mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}_1)-
-  \mathcal{L}_{\sigma}^{wqn,*})}{\eta T}
-  +\eta L_\sigma\sigma_w^2.
+  \frac{2(\mathcal{L}_{\sigma}(\boldsymbol{W}_1)-
+  \mathcal{L}_{\sigma}^{*})}{\eta T}
+  +\eta L_\sigma\sigma_{eff}^2.
   \]
-- 将“原始 PTQ 目标不可导，因此高斯平滑后可微”改成标准 smoothness assumption，避免过度声称对任意深网严格成立。
-- 删除 trajectory-level telescoping bias 的证明路线，改用 fresh-pair 差分噪声的严格零均值性质，使无偏性更清楚。
-- 修正原文中 `\begin{proof} xxx \end{proof}` 后又继续证明的结构错误，将证明完整放入 proof 环境。
+- 将学习率结论写为 horizon-dependent constant stepsize：\(\eta=\min\{1/L_\sigma,c/\sqrt{T}\}\)。
 
 **修改原因**
 
-原附录最大问题是逻辑不严谨且证明对象过宽：如果把 WQN、AQN 和 SWA 全部放入同一个定理，需要处理激活扰动的数据依赖性、网络内部层间耦合以及 SWA 的后处理平均，这会显著增加理论负担，也容易被审稿人质疑。修订后只证明 WQN：
-1. 差分权重噪声严格零均值，避免非零量化误差均值造成的梯度偏置；
-2. WQN 梯度是 WQN-smoothed objective 的无偏估计；
-3. 在 Lipschitz smoothness、下界存在和有界方差假设下，可直接使用标准非凸 SGD 下降引理得到一阶驻点收敛界。
-这个证明范围更窄，但数学上更可靠，也更符合“收敛性证明只针对权重噪声注入”的要求。
+原 fresh-pair 版本虽然数学更干净，但不完全符合当前实现中“当前噪声减上一时刻噪声”的差分注入机制，且相邻两次噪声的统计量可能随权重、量化尺度或 EMA 更新而变化。新的证明保留实现一致性：
+1. 差分扰动在轨迹平均意义下消除持续漂移；
+2. 条件无偏性被明确写成 tractable analysis 的理想化假设；
+3. 后续收敛推导仍采用标准非凸 SGD 下降引理、条件期望、有界方差和望远镜求和。
+这个版本更忠实于代码实现，也避免将 AQN/SWA 的复杂动态错误地纳入同一个定理。
 
 ## 12. 尚需作者确认的内容
 
