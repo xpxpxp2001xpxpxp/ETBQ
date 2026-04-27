@@ -146,21 +146,47 @@ WQN 是论文最关键的方法创新之一。原稿中有正确方向，但符�
 
 **修改内容**
 
-- 将原附录中混乱的证明重写为标准 non-convex stochastic optimization 证明。
-- 保留核心定理形式：
+- 根据后续讨论，将附录进一步收窄为 **WQN-only** 收敛性证明；AQN 和 SWA 不再放入该定理中。
+- 将差分权重噪声定义为两个同分布权重量化误差样本之差：
   \[
-  \frac{1}{T}\sum_{t=1}^{T}\mathbb{E}\|\nabla \mathcal{L}_\sigma(\boldsymbol{W}_t)\|^2
-  \leq
-  \frac{2(\mathcal{L}_\sigma(\boldsymbol{W}_1)-\mathcal{L}_\sigma^*)}{\eta T}
-  +\eta L_\sigma\sigma_{eff}^2.
+  \boldsymbol{\zeta}_t=\lambda_e(\boldsymbol{\delta}_t^+-\boldsymbol{\delta}_t^-),
+  \quad
+  \boldsymbol{\delta}_t^+,\boldsymbol{\delta}_t^-\overset{i.i.d.}{\sim}
+  \mathcal{N}(\boldsymbol{\mu}_w,\boldsymbol{\Sigma}_w).
   \]
-- 将“原始 PTQ 目标不可导，因此高斯平滑后可微”改成假设形式，避免过度声称对任意深网严格成立。
-- 将差分噪声的 telescope drift 写成 Assumption 3 中的 trajectory-averaged asymptotic unbiasedness。
+  因而有
+  \[
+  \mathbb{E}[\boldsymbol{\zeta}_t]=\mathbf{0},
+  \qquad
+  \mathrm{Cov}(\boldsymbol{\zeta}_t)=2\lambda_e^2\boldsymbol{\Sigma}_w.
+  \]
+- 将 WQN 平滑目标定义为：
+  \[
+  \mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W})
+  =
+  \mathbb{E}_{\boldsymbol{\zeta}}
+  [\mathcal{L}(\boldsymbol{W}+\boldsymbol{\zeta})].
+  \]
+- 收敛定理改为：
+  \[
+  \frac{1}{T}\sum_{t=1}^{T}\mathbb{E}
+  \|\nabla \mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}_t)\|^2
+  \leq
+  \frac{2(\mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}_1)-
+  \mathcal{L}_{\sigma}^{wqn,*})}{\eta T}
+  +\eta L_\sigma\sigma_w^2.
+  \]
+- 将“原始 PTQ 目标不可导，因此高斯平滑后可微”改成标准 smoothness assumption，避免过度声称对任意深网严格成立。
+- 删除 trajectory-level telescoping bias 的证明路线，改用 fresh-pair 差分噪声的严格零均值性质，使无偏性更清楚。
 - 修正原文中 `\begin{proof} xxx \end{proof}` 后又继续证明的结构错误，将证明完整放入 proof 环境。
 
 **修改原因**
 
-原附录最大问题是逻辑不严谨且结构错误：先写 `xxx`，然后 proof 环境结束后继续证明。修订后的证明遵循下降引理、无偏/有界方差、望远镜求和的标准路线，审稿人更容易接受。需要注意的是，严格理论上 ETBQ 的差分噪声是“轨迹平均意义下渐近无偏”，不是每一步严格无偏；修订稿已避免把它说成每步严格无偏。
+原附录最大问题是逻辑不严谨且证明对象过宽：如果把 WQN、AQN 和 SWA 全部放入同一个定理，需要处理激活扰动的数据依赖性、网络内部层间耦合以及 SWA 的后处理平均，这会显著增加理论负担，也容易被审稿人质疑。修订后只证明 WQN：
+1. 差分权重噪声严格零均值，避免非零量化误差均值造成的梯度偏置；
+2. WQN 梯度是 WQN-smoothed objective 的无偏估计；
+3. 在 Lipschitz smoothness、下界存在和有界方差假设下，可直接使用标准非凸 SGD 下降引理得到一阶驻点收敛界。
+这个证明范围更窄，但数学上更可靠，也更符合“收敛性证明只针对权重噪声注入”的要求。
 
 ## 12. 尚需作者确认的内容
 

@@ -110,7 +110,7 @@ Our main contributions are summarized as follows:
 \begin{itemize}
     \item We identify the sharpness of the FP loss landscape as a key bottleneck for extreme low-bit PTQ and provide a geometric explanation for why post-hoc reconstruction alone can be insufficient.
     \item We propose ETBQ, an efficient pre-tuning framework that decouples weight and activation quantization errors through WQN and AQN, thereby aligning flatness with the actual perturbation statistics of the target bit-width.
-    \item We provide a convergence analysis showing that ETBQ optimizes a smoothed surrogate objective under standard non-convex stochastic optimization assumptions.
+    \item We provide a convergence analysis for the WQN-only update, showing that differential weight-noise injection optimizes a smoothed surrogate objective under standard non-convex stochastic optimization assumptions.
     \item Extensive experiments on classification and semantic segmentation demonstrate that ETBQ consistently improves PTQ accuracy, especially in W2A4 and W2A2 settings.
 \end{itemize}
 
@@ -188,32 +188,41 @@ This yields a mean vector $\boldsymbol{\mu}_w \in \mathbb{R}^{C_{out}}$ and a di
 \subsubsection{Noise Injection via Anti-correlation}
 \label{sec:wqn_injection}
 
-Given the modeled distribution $\mathcal{N}(\boldsymbol{\mu}_w, \boldsymbol{\Sigma}_w)$, directly adding i.i.d. noise at every step would introduce a persistent mean shift when $\boldsymbol{\mu}_w \neq \mathbf{0}$. ETBQ instead uses a temporally anti-correlated differential mechanism. At step $t$, we construct the temporary evaluation weight
+Given the modeled distribution $\mathcal{N}(\boldsymbol{\mu}_w, \boldsymbol{\Sigma}_w)$, directly adding i.i.d. noise at every step would introduce a persistent mean shift when $\boldsymbol{\mu}_w \neq \mathbf{0}$. ETBQ instead uses a differential mechanism that cancels this mean. Let $\boldsymbol{\delta}^{+}_{t}$ and $\boldsymbol{\delta}^{-}_{t}$ be two quantization-error samples drawn from $\mathcal{N}(\boldsymbol{\mu}_w, \boldsymbol{\Sigma}_w)$. At step $t$, we construct the temporary evaluation weight
 \begin{equation} \label{eqt:diff_noise_def}
-   \boldsymbol{W}'_t = \widetilde{\boldsymbol{W}}_t + \lambda_e \cdot \boldsymbol{\delta}_{t} - \boldsymbol{\delta}_{t-1},
+   \boldsymbol{W}'_t = \widetilde{\boldsymbol{W}}_t + \boldsymbol{\zeta}_t,
+   \qquad
+   \boldsymbol{\zeta}_t = \lambda_e(\boldsymbol{\delta}^{+}_{t}-\boldsymbol{\delta}^{-}_{t}),
 \end{equation}
-where $\widetilde{\boldsymbol{W}}_t$ is the physical trainable weight, $\boldsymbol{\delta}_{t}$ and $\boldsymbol{\delta}_{t-1}$ are consecutive samples from $\mathcal{N}(\boldsymbol{\mu}_w, \boldsymbol{\Sigma}_w)$, and $\lambda_e \in [0,1]$ is an epoch-dependent annealing coefficient. As $\lambda_e$ approaches 1, the expected differential perturbation approaches zero. Over the full trajectory, the accumulated bias forms a telescoping sum and becomes negligible in the time average.
+where $\widetilde{\boldsymbol{W}}_t$ is the physical trainable weight and $\lambda_e \in [0,1]$ is an epoch-dependent annealing coefficient. The differential perturbation satisfies
+$\mathbb{E}[\boldsymbol{\zeta}_t]=\mathbf{0}$ and
+$\mathrm{Cov}(\boldsymbol{\zeta}_t)=2\lambda_e^2\boldsymbol{\Sigma}_w$.
+Thus, WQN preserves the variance structure of the target quantization error while removing the mean drift that would otherwise bias optimization. In implementation, the second sample can be realized by the perturbation stored from the previous step; the convergence analysis in Appendix~\ref{app:proof} uses the equivalent fresh-pair form in Eq.~\eqref{eqt:diff_noise_def} to avoid temporal-correlation bookkeeping.
 
-To expose the effective objective, define a latent clean weight $\boldsymbol{W}_t \triangleq \widetilde{\boldsymbol{W}}_t - \lambda_e \boldsymbol{\delta}_t$. The physical update with Eq.~\eqref{eqt:diff_noise_def} is equivalent to evaluating gradients at a perturbed latent point:
+For fixed noise statistics and fixed $\lambda_e$, the stochastic gradient evaluated at $\boldsymbol{W}'_t$ is an unbiased estimator of the gradient of a WQN-smoothed objective:
 \begin{equation}
 \label{eqt:latent_trajectory}
-\boldsymbol{W}_{t+1} = \boldsymbol{W}_{t} - \eta \nabla \mathcal{L}(\boldsymbol{W}_{t} + \lambda_e \boldsymbol{\delta}_{t+1}),
+\mathbb{E}_{\boldsymbol{\zeta}_t}\left[\nabla \mathcal{L}(\widetilde{\boldsymbol{W}}_t+\boldsymbol{\zeta}_t)\right]
+=
+\nabla \mathcal{L}^{wqn}_{\sigma}(\widetilde{\boldsymbol{W}}_t),
 \end{equation}
-where $\eta$ is the learning rate. Thus WQN optimizes a stochastically smoothed objective while avoiding persistent drift in the physical weights. This derivation assumes SGD-style isotropic updates; extending the same mechanism to strongly anisotropic adaptive optimizers such as Adam is left for future work.
+where $\mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W})=\mathbb{E}_{\boldsymbol{\zeta}}[\mathcal{L}(\boldsymbol{W}+\boldsymbol{\zeta})]$. This derivation assumes SGD-style updates; extending the same mechanism to strongly anisotropic adaptive optimizers such as Adam is left for future work.
 
 \subsubsection{Regularizing Hessian Trace}
 \label{sec:wqn_hessian}
 
 Equation~\eqref{eqt:latent_trajectory} implies that WQN approximately minimizes
 \[
-\tilde{\mathcal{L}}(\boldsymbol{W}) = \mathbb{E}_{\boldsymbol{\delta}}[\mathcal{L}(\boldsymbol{W} + \lambda_e \boldsymbol{\delta})].
+\mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}) = \mathbb{E}_{\boldsymbol{\zeta}}[\mathcal{L}(\boldsymbol{W} + \boldsymbol{\zeta})],
+\qquad
+\boldsymbol{\zeta}\sim\mathcal{N}(\mathbf{0},2\lambda_e^2\boldsymbol{\Sigma}_w).
 \]
-Decompose $\boldsymbol{\delta} = \boldsymbol{\mu}_w + \boldsymbol{\epsilon}$, where $\boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \boldsymbol{\Sigma}_w)$. A second-order Taylor expansion around $\boldsymbol{W} + \lambda_e \boldsymbol{\mu}_w$ gives
+A second-order Taylor expansion around $\boldsymbol{W}$ gives
 \begin{equation}
 \label{eqt:effective_loss_final}
-\tilde{\mathcal{L}}(\boldsymbol{W}) \approx \underbrace{\mathcal{L}(\boldsymbol{W} + \lambda_e \boldsymbol{\mu}_w)}_{\text{Targeting the quantized center}} + \underbrace{\frac{\lambda_e^2}{2} \mathrm{Tr}(\boldsymbol{H}_{w,\mu} \boldsymbol{\Sigma}_w)}_{\text{Flattening the specific landscape}},
+\mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}) \approx \underbrace{\mathcal{L}(\boldsymbol{W})}_{\text{Clean objective}} + \underbrace{\lambda_e^2 \mathrm{Tr}(\boldsymbol{H}_{w} \boldsymbol{\Sigma}_w)}_{\text{Quantization-aligned curvature penalty}},
 \end{equation}
-where $\boldsymbol{H}_{w,\mu} = \nabla^2 \mathcal{L}(\boldsymbol{W} + \lambda_e \boldsymbol{\mu}_w)$. This objective has two desirable effects: it shifts optimization toward the expected deployed state and penalizes curvature along directions where quantization error variance is large. WQN therefore does not flatten the landscape uniformly; it aligns flatness with the target quantization grid.
+where $\boldsymbol{H}_{w} = \nabla^2 \mathcal{L}(\boldsymbol{W})$. The first-order term vanishes because $\mathbb{E}[\boldsymbol{\zeta}]=\mathbf{0}$, and the second-order term follows from $\mathrm{Cov}(\boldsymbol{\zeta})=2\lambda_e^2\boldsymbol{\Sigma}_w$. Therefore, WQN does not flatten the landscape uniformly; it penalizes curvature most strongly along directions where the target quantizer produces larger weight errors.
 
 \subsection{Activation Quantization Noise (AQN)}
 \label{sec:aqn}
@@ -469,7 +478,7 @@ Table~\ref{tbl:segment} shows that ETBQ improves all quantization settings. Nota
 
 \section{Conclusion}
 
-This paper studies low-bit PTQ from the perspective of loss-landscape geometry. We argue that a major cause of PTQ degradation is that standard SGD can produce full-precision models located in sharp minima that are not robust to quantization perturbations. To address this issue, we propose ETBQ, an efficient pre-tuning framework that reshapes the full-precision landscape before quantization. WQN injects differential weight quantization noise to regularize the Hessian trace around the expected quantized state, AQN injects activation quantization noise through a salience-aware mask to improve activation robustness, and SWA consolidates the final solution in a flat basin. Experiments on CIFAR-100, Tiny-ImageNet, and Cityscapes demonstrate that ETBQ consistently improves PTQ accuracy, particularly in extreme low-bit settings. Future work includes modeling non-Gaussian quantization errors and extending ETBQ to architectures primarily optimized by adaptive optimizers such as Adam.
+This paper studies low-bit PTQ from the perspective of loss-landscape geometry. We argue that a major cause of PTQ degradation is that standard SGD can produce full-precision models located in sharp minima that are not robust to quantization perturbations. To address this issue, we propose ETBQ, an efficient pre-tuning framework that reshapes the full-precision landscape before quantization. WQN injects differential weight quantization noise to regularize the Hessian trace along quantization-sensitive directions, AQN injects activation quantization noise through a salience-aware mask to improve activation robustness, and SWA consolidates the final solution in a flat basin. Experiments on CIFAR-100, Tiny-ImageNet, and Cityscapes demonstrate that ETBQ consistently improves PTQ accuracy, particularly in extreme low-bit settings. Future work includes modeling non-Gaussian quantization errors and extending ETBQ to architectures primarily optimized by adaptive optimizers such as Adam.
 
 \bibliographystyle{named}
 \bibliography{ijcai25.bib}
@@ -479,105 +488,137 @@ This paper studies low-bit PTQ from the perspective of loss-landscape geometry. 
 
 \appendix
 
-\section{Proof of Convergence for ETBQ}
+\section{Proof of Convergence for WQN}
 \label{app:proof}
 
-We provide a convergence analysis for ETBQ under the standard framework of non-convex stochastic optimization. Let $\mathcal{L}(\boldsymbol{W})$ denote the task loss, and let ETBQ optimize the Gaussian-smoothed surrogate
+This appendix analyzes the convergence of the \textbf{WQN-only} update. AQN and SWA are important components of the complete ETBQ framework, but they are not included in this theorem: AQN perturbs intermediate activations in a data-dependent way, and SWA averages iterates after optimization. The purpose of the proof is narrower and more precise: to show that differential weight-noise injection performs SGD on a smoothed weight-space objective.
+
+Let $\mathcal{L}(\boldsymbol{W})$ denote the empirical training loss with respect to the full-precision weights. At iteration $t$, WQN samples two independent weight quantization-error tensors
 \[
-\mathcal{L}_\sigma(\boldsymbol{W})=\mathbb{E}_{\boldsymbol{\delta}}[\mathcal{L}(\boldsymbol{W}+\boldsymbol{\delta})],
+\boldsymbol{\delta}_{t}^{+},\boldsymbol{\delta}_{t}^{-}
+\overset{i.i.d.}{\sim}
+\mathcal{N}(\boldsymbol{\mu}_w,\boldsymbol{\Sigma}_w),
 \]
-where $\boldsymbol{\delta}$ collects the effective WQN and AQN perturbations. The proof abstracts away architectural details and focuses on the stochastic gradients induced by the perturbation process.
+and forms the differential perturbation
+\[
+\boldsymbol{\zeta}_t=\lambda_e(\boldsymbol{\delta}_{t}^{+}-\boldsymbol{\delta}_{t}^{-}).
+\]
+Because the two samples have the same mean, $\mathbb{E}[\boldsymbol{\zeta}_t]=\mathbf{0}$ and $\mathrm{Cov}(\boldsymbol{\zeta}_t)=2\lambda_e^2\boldsymbol{\Sigma}_w$. The theorem treats $\lambda_e$ and the estimated WQN statistics as fixed during the analyzed optimization interval; in practice, annealing and EMA updates can be regarded as a slow external schedule. Under this fixed-distribution view, define the WQN-smoothed objective
+\begin{equation}
+\label{eq:app_wqn_smooth}
+\mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W})
+=
+\mathbb{E}_{\boldsymbol{\zeta}}\left[\mathcal{L}(\boldsymbol{W}+\boldsymbol{\zeta})\right],
+\qquad
+\boldsymbol{\zeta}\sim\mathcal{N}(\mathbf{0},2\lambda_e^2\boldsymbol{\Sigma}_w).
+\end{equation}
+The stochastic gradient used by WQN is
+\[
+\tilde{\boldsymbol{g}}_t
+=
+\nabla \mathcal{L}(\boldsymbol{W}_t+\boldsymbol{\zeta}_t;\xi_t),
+\]
+where $\xi_t$ denotes the minibatch randomness. Under the usual interchange of differentiation and expectation, this gradient is an unbiased estimator of $\nabla\mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}_t)$.
 
 \textbf{Assumption 1 (Smooth Smoothed Objective).}
-The smoothed objective $\mathcal{L}_\sigma(\boldsymbol{W})$ has $L_\sigma$-Lipschitz continuous gradients: for any $\boldsymbol{W}_1,\boldsymbol{W}_2$,
+The smoothed objective $\mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W})$ has $L_\sigma$-Lipschitz continuous gradients: for any $\boldsymbol{W}_1,\boldsymbol{W}_2$,
 \begin{equation}
-    \|\nabla \mathcal{L}_\sigma(\boldsymbol{W}_1) - \nabla \mathcal{L}_\sigma(\boldsymbol{W}_2)\| \leq L_\sigma \|\boldsymbol{W}_1 - \boldsymbol{W}_2\|.
+    \|\nabla \mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}_1) - \nabla \mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}_2)\| \leq L_\sigma \|\boldsymbol{W}_1 - \boldsymbol{W}_2\|.
 \end{equation}
-This assumption is natural because randomized smoothing by continuous perturbations mollifies the non-smooth effects introduced by quantization-like operators.
+This is the standard smoothness condition used in non-convex SGD analysis. The Gaussian smoothing in Eq.~\eqref{eq:app_wqn_smooth} makes the objective less sensitive to local irregularities caused by quantization-like perturbations.
 
 \textbf{Assumption 2 (Lower Bounded Objective).}
-There exists $\mathcal{L}_\sigma^* > -\infty$ such that $\mathcal{L}_\sigma(\boldsymbol{W}) \geq \mathcal{L}_\sigma^*$ for all $\boldsymbol{W}$. For cross-entropy training, the loss is non-negative, so this condition holds.
+There exists $\mathcal{L}_{\sigma}^{wqn,*} > -\infty$ such that $\mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}) \geq \mathcal{L}_{\sigma}^{wqn,*}$ for all $\boldsymbol{W}$. For cross-entropy training, this follows from non-negativity.
 
-\textbf{Assumption 3 (Asymptotically Unbiased Gradient and Bounded Variance).}
-Let $\tilde{\boldsymbol{g}}_t$ be the stochastic gradient used by ETBQ and $\boldsymbol{g}_t=\nabla \mathcal{L}_\sigma(\boldsymbol{W}_t)$. The differential WQN term has time-averaged drift that vanishes by telescoping:
+\textbf{Assumption 3 (Unbiased Gradient and Bounded Variance).}
+Let $\boldsymbol{g}_t=\nabla\mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}_t)$. The WQN stochastic gradient satisfies
 \begin{equation}
-    \frac{1}{T}\sum_{t=1}^{T}\mathbb{E}[\boldsymbol{\delta}_{w,t}-\boldsymbol{\delta}_{w,t-1}]
-    =\frac{\mathbb{E}[\boldsymbol{\delta}_{w,T}]-\mathbb{E}[\boldsymbol{\delta}_{w,0}]}{T}
-    \rightarrow \mathbf{0}.
+    \mathbb{E}[\tilde{\boldsymbol{g}}_t\mid \boldsymbol{W}_t]=\boldsymbol{g}_t,
 \end{equation}
-We therefore treat the trajectory-averaged gradient estimator as unbiased for the smoothed objective and assume bounded variance:
+and has bounded conditional variance:
 \begin{equation}
-    \mathbb{E}\left[\|\tilde{\boldsymbol{g}}_t-\boldsymbol{g}_t\|^2\right]\leq \sigma_{eff}^2.
+    \mathbb{E}\left[\|\tilde{\boldsymbol{g}}_t-\boldsymbol{g}_t\|^2\mid\boldsymbol{W}_t\right]\leq \sigma_w^2.
 \end{equation}
+This assumption captures both minibatch noise and WQN sampling noise. The key point is that the differential perturbation is exactly zero-mean in the fresh-pair form, so no trajectory-level bias correction is required for this theorem.
 
 \begin{theorem}
-\textit{Under Assumptions 1--3, the ETBQ optimization sequence $\{\boldsymbol{W}_t\}_{t=1}^T$ generated by SGD with learning rate $\eta \leq \frac{1}{L_\sigma}$ satisfies}
+\textit{Under Assumptions 1--3, the WQN update sequence $\{\boldsymbol{W}_t\}_{t=1}^T$ generated by}
+\[
+\boldsymbol{W}_{t+1}=\boldsymbol{W}_t-\eta\tilde{\boldsymbol{g}}_t
+\]
+\textit{with learning rate $\eta \leq \frac{1}{L_\sigma}$ satisfies}
 \begin{equation}
-\frac{1}{T} \sum_{t=1}^{T} \mathbb{E}\left[\|\nabla \mathcal{L}_\sigma(\boldsymbol{W}_t)\|^2\right] \leq \frac{2(\mathcal{L}_\sigma(\boldsymbol{W}_1) - \mathcal{L}_\sigma^*)}{\eta T} + \eta L_\sigma \sigma_{eff}^2.
+\frac{1}{T} \sum_{t=1}^{T} \mathbb{E}\left[\|\nabla \mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}_t)\|^2\right]
+\leq
+\frac{2(\mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}_1) - \mathcal{L}_{\sigma}^{wqn,*})}{\eta T}
++ \eta L_\sigma \sigma_w^2.
 \end{equation}
-\textit{Consequently, with a standard diminishing learning rate, ETBQ converges to a first-order stationary point of the smoothed objective in expectation.}
+\textit{Consequently, with a standard diminishing learning rate, WQN converges to a first-order stationary point of the WQN-smoothed objective in expectation.}
 \end{theorem}
 
 \begin{proof}
-By $L_\sigma$-smoothness and the SGD update $\boldsymbol{W}_{t+1}=\boldsymbol{W}_t-\eta\tilde{\boldsymbol{g}}_t$, the descent lemma gives
+For compactness, write $\mathcal{F}(\boldsymbol{W})=\mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W})$ and $\nabla\mathcal{F}(\boldsymbol{W}_t)=\boldsymbol{g}_t$. By $L_\sigma$-smoothness and the update $\boldsymbol{W}_{t+1}=\boldsymbol{W}_t-\eta\tilde{\boldsymbol{g}}_t$, the descent lemma gives
 \begin{equation}
-    \mathcal{L}_\sigma(\boldsymbol{W}_{t+1})
+    \mathcal{F}(\boldsymbol{W}_{t+1})
     \leq
-    \mathcal{L}_\sigma(\boldsymbol{W}_t)
-    -\eta\langle \nabla \mathcal{L}_\sigma(\boldsymbol{W}_t),\tilde{\boldsymbol{g}}_t\rangle
+    \mathcal{F}(\boldsymbol{W}_t)
+    -\eta\langle \boldsymbol{g}_t,\tilde{\boldsymbol{g}}_t\rangle
     +\frac{L_\sigma\eta^2}{2}\|\tilde{\boldsymbol{g}}_t\|^2.
 \end{equation}
-Taking expectation and using the trajectory-unbiased property,
+Taking conditional expectation with respect to $\boldsymbol{W}_t$ and using Assumption 3,
 \begin{equation}
-    \mathbb{E}\left[\langle \nabla \mathcal{L}_\sigma(\boldsymbol{W}_t),\tilde{\boldsymbol{g}}_t\rangle\right]
+    \mathbb{E}\left[\langle \boldsymbol{g}_t,\tilde{\boldsymbol{g}}_t\rangle\mid\boldsymbol{W}_t\right]
     =
-    \mathbb{E}\left[\|\nabla \mathcal{L}_\sigma(\boldsymbol{W}_t)\|^2\right].
+    \|\boldsymbol{g}_t\|^2.
 \end{equation}
-The bounded-variance condition implies
+The conditional second moment is bounded by
 \begin{equation}
-    \mathbb{E}\left[\|\tilde{\boldsymbol{g}}_t\|^2\right]
+    \mathbb{E}\left[\|\tilde{\boldsymbol{g}}_t\|^2\mid\boldsymbol{W}_t\right]
     \leq
-    \mathbb{E}\left[\|\nabla \mathcal{L}_\sigma(\boldsymbol{W}_t)\|^2\right]+\sigma_{eff}^2.
+    \|\boldsymbol{g}_t\|^2+\sigma_w^2.
 \end{equation}
-Substituting these two relations yields
+Substituting these relations and then taking total expectation yields
 \begin{equation}
 \begin{aligned}
-    \mathbb{E}[\mathcal{L}_\sigma(\boldsymbol{W}_{t+1})]
+    \mathbb{E}[\mathcal{F}(\boldsymbol{W}_{t+1})]
     &\leq
-    \mathbb{E}[\mathcal{L}_\sigma(\boldsymbol{W}_t)]
+    \mathbb{E}[\mathcal{F}(\boldsymbol{W}_t)]
     -\eta\left(1-\frac{L_\sigma\eta}{2}\right)
-    \mathbb{E}\left[\|\nabla \mathcal{L}_\sigma(\boldsymbol{W}_t)\|^2\right]
-    +\frac{L_\sigma\eta^2}{2}\sigma_{eff}^2.
+    \mathbb{E}\left[\|\boldsymbol{g}_t\|^2\right]
+    +\frac{L_\sigma\eta^2}{2}\sigma_w^2.
 \end{aligned}
 \end{equation}
 Since $\eta\leq 1/L_\sigma$, we have $1-L_\sigma\eta/2\geq 1/2$, and therefore
 \begin{equation}
     \frac{\eta}{2}
-    \mathbb{E}\left[\|\nabla \mathcal{L}_\sigma(\boldsymbol{W}_t)\|^2\right]
+    \mathbb{E}\left[\|\boldsymbol{g}_t\|^2\right]
     \leq
-    \mathbb{E}[\mathcal{L}_\sigma(\boldsymbol{W}_t)]
+    \mathbb{E}[\mathcal{F}(\boldsymbol{W}_t)]
     -
-    \mathbb{E}[\mathcal{L}_\sigma(\boldsymbol{W}_{t+1})]
+    \mathbb{E}[\mathcal{F}(\boldsymbol{W}_{t+1})]
     +
-    \frac{L_\sigma\eta^2}{2}\sigma_{eff}^2.
+    \frac{L_\sigma\eta^2}{2}\sigma_w^2.
 \end{equation}
 Summing over $t=1,\ldots,T$ telescopes the loss terms:
 \begin{equation}
 \begin{aligned}
     \frac{\eta}{2}\sum_{t=1}^{T}
-    \mathbb{E}\left[\|\nabla \mathcal{L}_\sigma(\boldsymbol{W}_t)\|^2\right]
+    \mathbb{E}\left[\|\boldsymbol{g}_t\|^2\right]
     &\leq
-    \mathcal{L}_\sigma(\boldsymbol{W}_1)
-    -\mathbb{E}[\mathcal{L}_\sigma(\boldsymbol{W}_{T+1})]
-    +\frac{L_\sigma\eta^2T}{2}\sigma_{eff}^2 \\
+    \mathcal{F}(\boldsymbol{W}_1)
+    -\mathbb{E}[\mathcal{F}(\boldsymbol{W}_{T+1})]
+    +\frac{L_\sigma\eta^2T}{2}\sigma_w^2 \\
     &\leq
-    \mathcal{L}_\sigma(\boldsymbol{W}_1)-\mathcal{L}_\sigma^*
-    +\frac{L_\sigma\eta^2T}{2}\sigma_{eff}^2.
+    \mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}_1)-\mathcal{L}_{\sigma}^{wqn,*}
+    +\frac{L_\sigma\eta^2T}{2}\sigma_w^2.
 \end{aligned}
 \end{equation}
 Dividing both sides by $\eta T/2$ gives
 \begin{equation}
-    \frac{1}{T} \sum_{t=1}^{T} \mathbb{E}\left[\|\nabla \mathcal{L}_\sigma(\boldsymbol{W}_t)\|^2\right] \leq \frac{2(\mathcal{L}_\sigma(\boldsymbol{W}_1) - \mathcal{L}_\sigma^*)}{\eta T} + \eta L_\sigma \sigma_{eff}^2.
+    \frac{1}{T} \sum_{t=1}^{T} \mathbb{E}\left[\|\nabla\mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}_t)\|^2\right]
+    \leq
+    \frac{2(\mathcal{L}^{wqn}_{\sigma}(\boldsymbol{W}_1) - \mathcal{L}_{\sigma}^{wqn,*})}{\eta T}
+    + \eta L_\sigma \sigma_w^2.
 \end{equation}
 This completes the proof.
 \end{proof}
