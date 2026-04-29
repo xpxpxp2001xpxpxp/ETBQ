@@ -14,7 +14,7 @@
 
 \begin{document}
 
-\title{Noise-Decoupled Adam for Quantization-Friendly Fine-Tuning of Dense Prediction Networks}
+\title{Noise-Decoupled Adam for Stable Quantization-Noise Fine-Tuning of Dense Prediction Networks}
 
 \author{Peng Xia and Junbiao Pang%
 \thanks{Peng Xia and Junbiao Pang are with Beijing University of Technology. Corresponding author: Junbiao Pang.}
@@ -23,7 +23,7 @@
 \maketitle
 
 \begin{abstract}
-Post-training quantization (PTQ) is an attractive model compression paradigm because it avoids full quantization-aware retraining. Recent landscape pre-conditioning methods improve PTQ by injecting quantization-aware perturbations before calibration, encouraging a full-precision model to settle in a flatter, quantization-friendly basin. These methods are effective for standard visual backbones optimized by stochastic gradient descent (SGD). However, directly transferring quantization-noise fine-tuning to dense prediction networks trained with Adam-type optimizers, such as super-resolution models, often leads to unstable gradients and severe performance degradation. This paper identifies a fundamental optimizer--noise mismatch: in Adam, injected quantization noise is not merely a smoothing perturbation of the loss, but is also accumulated into the first- and second-moment states. In particular, the second-moment estimator absorbs the variance of quantization noise, distorting the coordinate-wise effective learning rates and breaking the smoothing interpretation that holds for SGD. To address this issue, we propose \emph{Noise-Decoupled Adam for ETBQ} (ND-Adam-ETBQ), a quantization-friendly fine-tuning framework that decouples the regularization role of quantization noise from Adam's adaptive moment estimation. ND-Adam-ETBQ first anchors a clean second-moment reference from unperturbed gradients, then performs quantization-noise smoothing with delayed and variance-anchored adaptive normalization. The proposed mechanism prevents quantization noise from dominating the Adam denominator while preserving its ability to reshape the loss landscape. We provide a theoretical diagnosis of Adam's noise-variance contamination, derive the stabilized update, and outline a comprehensive experimental protocol on image super-resolution and classification benchmarks. 
+Post-training quantization (PTQ) is an attractive model compression paradigm because it avoids full quantization-aware retraining. A promising way to improve low-bit PTQ is to fine-tune the full-precision model under simulated quantization perturbations before calibration, thereby encouraging the model to settle in a flatter and more quantization-tolerant basin. While this principle works well for models optimized by stochastic gradient descent (SGD), it becomes unstable for dense prediction networks that rely on Adam-type optimizers, such as image super-resolution models. This paper identifies a fundamental optimizer--noise mismatch: in Adam, injected quantization noise is not merely a smoothing perturbation of the loss, but is also accumulated into the first- and second-moment optimizer states. In particular, the second-moment estimator absorbs the variance of quantization noise, distorting coordinate-wise effective learning rates and breaking the smoothing interpretation that holds for SGD. To address this issue, we propose \emph{Noise-Decoupled Adam} (NDA), a stable quantization-noise fine-tuning framework that decouples the regularization role of quantization perturbations from Adam's adaptive moment estimation. NDA first anchors a clean second-moment reference from unperturbed gradients, then performs quantization-noise smoothing with delayed and variance-anchored adaptive normalization. The proposed mechanism prevents quantization noise from dominating the Adam denominator while preserving its ability to improve quantization robustness. We provide a theoretical diagnosis of Adam's noise-variance contamination, derive the stabilized update, and outline a comprehensive experimental design on image super-resolution and classification benchmarks.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -34,9 +34,9 @@ Post-training quantization, adaptive optimization, Adam, quantization noise, los
 
 Deep neural networks have achieved remarkable performance across classification, detection, segmentation, and image restoration. However, their computational cost remains a major obstacle for deployment on resource-constrained platforms. Quantization reduces memory footprint and computational complexity by mapping floating-point weights and activations to low-bit representations. Among quantization paradigms, post-training quantization (PTQ) is particularly attractive because it calibrates a pre-trained full-precision model with only limited data, avoiding the cost of full quantization-aware training (QAT).
 
-Recent PTQ methods have advanced from naive rounding to reconstruction-based optimization, including AdaRound~\cite{nagel2020adaround}, BRECQ~\cite{li2021brecq}, and QDrop~\cite{wei2022qdrop}. A complementary line of work studies \emph{pre-conditioning} the full-precision model before PTQ: instead of treating the full-precision model as a fixed oracle, the model is lightly tuned under quantization-aware perturbations so that the subsequent quantized model is less sensitive to discretization errors. Our previous Efficient Tuning Before Quantization (ETBQ) framework follows this principle and injects statistically modeled weight and activation quantization noises into SGD-optimized vision backbones.
+Recent PTQ methods have advanced from naive rounding to reconstruction-based optimization, including AdaRound~\cite{nagel2020adaround}, BRECQ~\cite{li2021brecq}, and QDrop~\cite{wei2022qdrop}. A complementary line of work studies \emph{quantization-noise fine-tuning}: instead of treating the full-precision model as a fixed oracle, the model is lightly tuned under simulated weight or activation quantization perturbations so that the subsequent quantized model is less sensitive to discretization errors. This perturbation-based pre-conditioning principle is most naturally understood under SGD, where the update follows the gradient evaluated at a perturbed point.
 
-Despite its effectiveness on standard visual recognition models, a direct application of ETBQ to Adam-optimized dense prediction networks can fail. This problem is especially evident in image super-resolution (SR), where architectures such as SRResNet~\cite{ledig2017srgan} are commonly optimized by Adam or AdamW~\cite{kingma2015adam,loshchilov2019adamw}. Dense prediction models require fine-grained feature mapping and pixel-level fidelity; adaptive optimizers are widely used because they stabilize training across heterogeneous layers and gradients. However, when quantization noise is injected during Adam fine-tuning, we empirically observe sharp spikes in the gradient norm and severe performance drops. This suggests that the mechanism that makes ETBQ effective under SGD does not directly transfer to adaptive moment estimation.
+However, a direct application of quantization-noise fine-tuning to Adam-optimized dense prediction networks can fail. This problem is especially evident in image super-resolution (SR), where architectures such as SRResNet~\cite{ledig2017srgan} are commonly optimized by Adam or AdamW~\cite{kingma2015adam,loshchilov2019adamw}. Dense prediction models require fine-grained feature mapping and pixel-level fidelity; adaptive optimizers are widely used because they stabilize training across heterogeneous layers and gradients. Yet when quantization noise is injected during Adam fine-tuning, we empirically observe sharp spikes in the gradient norm and severe performance drops. This suggests that the smoothing mechanism behind perturbation-based fine-tuning does not directly transfer to adaptive moment estimation.
 
 This paper studies the optimizer-level cause of this failure. In SGD, a noisy gradient
 \begin{equation}
@@ -58,25 +58,25 @@ Thus, high-variance quantization perturbations are interpreted by Adam as persis
     =
     \frac{\eta}{\sqrt{\boldsymbol{v}_t}+\epsilon}.
 \end{equation}
-This destroys the clean smoothing interpretation of SGD-based ETBQ.
+This destroys the clean smoothing interpretation of SGD-based quantization-noise fine-tuning.
 
-To resolve this optimizer--noise mismatch, we propose \textbf{Noise-Decoupled Adam for ETBQ} (ND-Adam-ETBQ). The central idea is simple: quantization noise should perturb the forward and backward pass to reshape the loss landscape, but it should not be allowed to freely dominate Adam's second-moment estimator. ND-Adam-ETBQ therefore anchors the adaptive denominator using clean gradients and applies a delayed, variance-anchored update during noisy fine-tuning. This preserves Adam's coordinate-wise conditioning while preventing quantization noise from collapsing or exploding the effective learning rates.
+To resolve this optimizer--noise mismatch, we propose \textbf{Noise-Decoupled Adam} (NDA). The central idea is simple: quantization noise should perturb the forward and backward pass to improve robustness, but it should not be allowed to freely dominate Adam's second-moment estimator. NDA therefore anchors the adaptive denominator using clean gradients and applies a delayed, variance-anchored update during noisy fine-tuning. This preserves Adam's coordinate-wise conditioning while preventing quantization noise from collapsing or exploding the effective learning rates.
 
 Our contributions are summarized as follows.
 \begin{itemize}
     \item We identify and formalize the failure mode of quantization-noise fine-tuning under Adam: injected quantization perturbations contaminate the second-moment estimator and break the SGD-style smoothed-objective interpretation.
-    \item We propose ND-Adam-ETBQ, a noise-decoupled adaptive fine-tuning framework that separates the landscape-smoothing role of quantization noise from the adaptive-moment estimation of Adam.
+    \item We propose NDA, a noise-decoupled adaptive fine-tuning framework that separates the robustness-inducing role of quantization noise from the adaptive-moment estimation of Adam.
     \item We introduce variance anchoring and delayed normalization to stabilize Adam under quantization perturbations, inspired by recent advances in adaptive optimizer analysis such as ADOPT~\cite{taniguchi2024adopt}.
-    \item We provide a TNNLS-style experimental protocol for super-resolution and recognition tasks, including gradient-norm, second-moment, and effective-learning-rate diagnostics.
+    \item We provide an experimental design for super-resolution and recognition tasks, including gradient-norm, second-moment, and effective-learning-rate diagnostics.
 \end{itemize}
 
 \section{Related Work}
 
 \subsection{Post-Training Quantization and Reconstruction}
-PTQ converts a pre-trained model to low precision using only a calibration set. AdaRound~\cite{nagel2020adaround} learns rounding decisions by minimizing layer-wise reconstruction error. BRECQ~\cite{li2021brecq} extends reconstruction from layers to blocks and introduces second-order sensitivity. QDrop~\cite{wei2022qdrop} improves reconstruction generalization by stochastically mixing quantized and full-precision activations. These methods improve calibration after pre-training, while ETBQ-style methods pre-condition the full-precision model before PTQ.
+PTQ converts a pre-trained model to low precision using only a calibration set. AdaRound~\cite{nagel2020adaround} learns rounding decisions by minimizing layer-wise reconstruction error. BRECQ~\cite{li2021brecq} extends reconstruction from layers to blocks and introduces second-order sensitivity. QDrop~\cite{wei2022qdrop} improves reconstruction generalization by stochastically mixing quantized and full-precision activations. These methods improve calibration after pre-training, while perturbation-based fine-tuning methods pre-condition the full-precision model before PTQ.
 
 \subsection{Noise Injection and Quantization-Aware Training}
-Noise injection provides a differentiable surrogate for quantization. DiffQ~\cite{defossez2022diffq} introduces pseudo-quantization noise for differentiable model compression. NIPQ~\cite{shin2023nipq} replaces non-differentiable quantization with noise proxies and optimizes precision allocation. SQAT/FPQ~\cite{pang2025sqat} argues that feature perturbation can implicitly regularize the Hessian matrix and stabilize QAT. Our work is related in spirit but differs in setting: we focus on PTQ-oriented pre-conditioning and analyze why the same perturbation principle fails under Adam unless optimizer states are noise-decoupled.
+Noise injection provides a differentiable surrogate for quantization. DiffQ~\cite{defossez2022diffq} introduces pseudo-quantization noise for differentiable model compression. NIPQ~\cite{shin2023nipq} replaces non-differentiable quantization with noise proxies and optimizes precision allocation. SQAT/FPQ~\cite{pang2025sqat} argues that feature perturbation can implicitly regularize the Hessian matrix and stabilize QAT. Our work is related in spirit but differs in focus: we study how quantization perturbations interact with Adam's optimizer states and propose an optimizer-level mechanism to stabilize such perturbations.
 
 \subsection{Adaptive Optimization}
 Adam~\cite{kingma2015adam} estimates first and second moments of stochastic gradients and performs coordinate-wise adaptive updates. AdamW~\cite{loshchilov2019adamw} decouples weight decay from Adam's adaptive update. Recent work revisits Adam's convergence properties. ADOPT~\cite{taniguchi2024adopt} modifies Adam by changing the ordering of second-moment normalization and momentum update, achieving convergence with arbitrary $\beta_2$. These results motivate our delayed-normalization design: current noisy gradients should not immediately and simultaneously determine both the numerator and denominator of the adaptive update.
@@ -84,7 +84,7 @@ Adam~\cite{kingma2015adam} estimates first and second moments of stochastic grad
 \subsection{Quantization and Optimizer States}
 Quantized Adam with error feedback~\cite{chen2020qadam} studies communication-efficient Adam and shows that quantization errors in gradients or weights require compensation to preserve convergence. The convergence literature on adaptive optimizers also shows that Adam's behavior is highly sensitive to how second moments are accumulated and used~\cite{reddi2018adam,taniguchi2024adopt}. These works support our central claim that quantization noise in Adam should be treated not only as objective smoothing but also as optimizer-state contamination.
 
-\section{Why ETBQ Fails Under Adam}
+\section{Why Quantization-Noise Fine-Tuning Fails Under Adam}
 
 \subsection{SGD: Noise as Loss Smoothing}
 Consider a quantization-noise perturbation $\boldsymbol{P}_t$ applied to the weights. Under SGD, the update is
@@ -187,7 +187,7 @@ Then
 \end{equation}
 Equation~\eqref{eq:adam_noise_contamination} shows that Adam accumulates quantization-noise variance into its second-moment estimator. Hence, the denominator no longer reflects only gradient geometry; it also reflects the intensity of injected quantization noise. This can lead to two adverse effects. First, before the second moment adapts, noisy gradients can produce abrupt update spikes. Second, after repeated noisy updates, $\boldsymbol{v}_t$ may become dominated by the noise floor, shrinking effective learning rates and preventing the model from escaping a sharp basin. Both phenomena are visible in dense prediction tasks such as super-resolution, where high-frequency pixel losses induce heterogeneous gradient scales.
 
-\section{Noise-Decoupled Adam for ETBQ}
+\section{Noise-Decoupled Adam}
 
 \subsection{Design Principle}
 The key principle is to decouple two roles of quantization noise:
@@ -195,7 +195,7 @@ The key principle is to decouple two roles of quantization noise:
     \item \emph{Regularization role}: quantization noise should perturb forward/backward computation so that the model becomes robust to low-bit deployment.
     \item \emph{Optimizer-state role}: quantization noise should not freely dominate Adam's second-moment statistics.
 \end{itemize}
-ND-Adam-ETBQ preserves the first role while controlling the second.
+NDA preserves the first role while controlling the second.
 
 \subsection{Clean Second-Moment Anchor}
 Before entering the strong noise-injection phase, we estimate a clean second-moment anchor from unperturbed or weakly perturbed gradients:
@@ -211,7 +211,7 @@ Before entering the strong noise-injection phase, we estimate a clean second-mom
 This anchor captures the coordinate-wise gradient geometry of the task without being dominated by injected quantization noise.
 
 \subsection{Noisy Gradient for Landscape Smoothing}
-During ETBQ fine-tuning, we still compute a noisy gradient
+During quantization-noise fine-tuning, we still compute a noisy gradient
 \begin{equation}
     \tilde{\boldsymbol{g}}_t
     =
@@ -221,10 +221,10 @@ During ETBQ fine-tuning, we still compute a noisy gradient
     \boldsymbol{W}_t+\boldsymbol{P}_t
     ),
 \end{equation}
-where $\boldsymbol{P}_t$ is the effective quantization perturbation. Thus, the smoothing effect of ETBQ is retained.
+where $\boldsymbol{P}_t$ is the effective quantization perturbation. Thus, the perturbation-driven smoothing effect is retained.
 
 \subsection{Delayed and Anchored Adaptive Normalization}
-Instead of letting $\tilde{\boldsymbol{g}}_t^2$ immediately determine the Adam denominator, ND-Adam-ETBQ uses an anchored denominator:
+Instead of letting $\tilde{\boldsymbol{g}}_t^2$ immediately determine the Adam denominator, NDA uses an anchored denominator:
 \begin{equation}
     \boldsymbol{d}_t
     =
@@ -282,18 +282,18 @@ Inspired by ADOPT~\cite{taniguchi2024adopt}, we normalize the current noisy grad
 The clipping operator is applied element-wise or by global norm. It prevents rare quantization-noise spikes from dominating the update.
 
 \begin{algorithm}[t]
-\caption{ND-Adam-ETBQ}
-\label{alg:nd_adam_etbq}
+\caption{Noise-Decoupled Adam}
+\label{alg:noise_decoupled_adam}
 \begin{algorithmic}[1]
-\STATE {\bfseries Input:} Pre-trained model $\boldsymbol{W}$, calibration set $\mathscr{D}_c$, training set $\mathscr{D}_t$, ETBQ perturbation schedule, Adam parameters $(\eta,\beta_1,\beta_2,\epsilon)$.
+\STATE {\bfseries Input:} Pre-trained model $\boldsymbol{W}$, calibration set $\mathscr{D}_c$, training set $\mathscr{D}_t$, quantization-noise schedule, Adam parameters $(\eta,\beta_1,\beta_2,\epsilon)$.
 \STATE Estimate clean anchor $\boldsymbol{v}_{\mathrm{ref}}$ using unperturbed gradients.
-\FOR{each ETBQ fine-tuning step $t$}
+\FOR{each quantization-noise fine-tuning step $t$}
     \STATE Inject quantization perturbations and compute noisy gradient $\tilde{\boldsymbol{g}}_t=\nabla\mathcal{L}(\boldsymbol{W}_t+\boldsymbol{P}_t)$.
     \STATE Update or freeze anchored second moment $\boldsymbol{v}_{\mathrm{anc},t}$.
     \STATE Normalize $\tilde{\boldsymbol{g}}_t$ using delayed anchored denominator and clip the normalized update.
     \STATE Update first momentum $\boldsymbol{m}_t$ and weights $\boldsymbol{W}_{t+1}$.
 \ENDFOR
-\STATE {\bfseries Output:} Adam-compatible quantization-friendly model.
+\STATE {\bfseries Output:} Adam-stabilized quantization-friendly model.
 \end{algorithmic}
 \end{algorithm}
 
@@ -306,7 +306,7 @@ For standard Adam under noisy gradients, the effective learning rate is
     =
     \frac{\eta}{\sqrt{\boldsymbol{v}_t}+\epsilon},
 \end{equation}
-where $\boldsymbol{v}_t$ includes the noise variance term in Eq.~\eqref{eq:adam_noise_contamination}. In ND-Adam-ETBQ, the denominator is anchored:
+where $\boldsymbol{v}_t$ includes the noise variance term in Eq.~\eqref{eq:adam_noise_contamination}. In NDA, the denominator is anchored:
 \begin{equation}
     \eta_{\mathrm{eff},t}^{ND}
     =
@@ -322,24 +322,24 @@ If $\boldsymbol{v}_{\mathrm{anc},t}$ is clipped within $[\gamma_{\min}\boldsymbo
 \end{equation}
 Thus, the optimizer is protected from both noise-induced denominator explosion and denominator collapse.
 
-\subsection{Preserving ETBQ Smoothing}
-Because noisy gradients are still computed from perturbed weights or activations, ND-Adam-ETBQ preserves the smoothing role of ETBQ. The main difference is that the adaptive preconditioner is no longer freely determined by the same noisy gradient. In other words, noise still regularizes the objective but is decoupled from the optimizer state.
+\subsection{Preserving Perturbation-Based Smoothing}
+Because noisy gradients are still computed from perturbed weights or activations, NDA preserves the smoothing role of quantization perturbations. The main difference is that the adaptive preconditioner is no longer freely determined by the same noisy gradient. In other words, noise still regularizes the objective but is decoupled from the optimizer state.
 
 \section{Experimental Design}
 
 \subsection{Tasks and Datasets}
-The primary target is image super-resolution on DIV2K~\cite{agustsson2017div2k}, using SRResNet-style backbones~\cite{ledig2017srgan}. We also include recognition backbones as auxiliary experiments to verify that the proposed optimizer modification does not degrade ETBQ behavior in settings where SGD-based fine-tuning is already stable.
+The primary target is image super-resolution on DIV2K~\cite{agustsson2017div2k}, using SRResNet-style backbones~\cite{ledig2017srgan}. We also include recognition backbones as auxiliary experiments to verify that the proposed optimizer modification does not degrade perturbation-based fine-tuning in settings where SGD-style updates are already stable.
 
 \subsection{Baselines}
 We compare the proposed method with the following baselines:
 \begin{itemize}
     \item FP32 Adam/AdamW fine-tuning without noise.
-    \item Naive ETBQ-Adam, where quantization noise is injected and Adam moments are updated normally.
-    \item ETBQ with gradient clipping.
-    \item ETBQ with frozen second moment.
-    \item ETBQ with variance anchoring.
-    \item ETBQ with delayed normalization.
-    \item Full ND-Adam-ETBQ.
+    \item Naive noise-injected Adam, where quantization noise is injected and Adam moments are updated normally.
+    \item Noise-injected Adam with gradient clipping.
+    \item Noise-injected Adam with frozen second moment.
+    \item Noise-injected Adam with variance anchoring.
+    \item Noise-injected Adam with delayed normalization.
+    \item Full Noise-Decoupled Adam.
 \end{itemize}
 
 \subsection{Diagnostics}
@@ -357,10 +357,10 @@ To verify the optimizer-level mechanism, we report the following diagnostic curv
 These diagnostics distinguish gradient explosion, second-moment contamination, and effective-learning-rate collapse.
 
 \section{Discussion}
-The proposed method should be interpreted as an optimizer-compatible extension of ETBQ. SGD-based ETBQ relies on the direct relationship between perturbed gradients and smoothed-objective optimization. Adam breaks this relationship because injected noise becomes part of the adaptive moments. ND-Adam-ETBQ restores the separation: quantization noise is used for robustness, while moment estimation remains anchored to stable gradient geometry. This design is especially suitable for dense prediction tasks, where Adam is often indispensable and naive noise injection can be destructive.
+The proposed method should be interpreted as an optimizer-level stabilization mechanism for quantization-noise fine-tuning. SGD-style perturbation training relies on the direct relationship between perturbed gradients and smoothed-objective optimization. Adam breaks this relationship because injected noise becomes part of the adaptive moments. NDA restores the separation: quantization noise is used for robustness, while moment estimation remains anchored to stable gradient geometry. This design is especially suitable for dense prediction tasks, where Adam is often indispensable and naive noise injection can be destructive.
 
 \section{Conclusion}
-This paper presented a TNNLS-style framework for extending quantization-friendly fine-tuning from SGD-optimized recognition networks to Adam-optimized dense prediction models. We showed that the direct application of ETBQ to Adam is unstable because quantization noise contaminates Adam's second-moment estimator, distorting effective learning rates. To address this issue, we proposed ND-Adam-ETBQ, which decouples noisy landscape smoothing from adaptive moment estimation through clean second-moment anchoring, delayed normalization, and variance clipping. This framework provides a principled path toward low-bit PTQ for super-resolution and other Adam-dependent dense prediction tasks.
+This paper presented a standalone framework for stable quantization-noise fine-tuning with Adam-type optimizers. We showed that directly injecting quantization noise into Adam training is unstable because the noise contaminates the second-moment estimator and distorts effective learning rates. To address this issue, we proposed Noise-Decoupled Adam, which decouples noisy landscape smoothing from adaptive moment estimation through clean second-moment anchoring, delayed normalization, and variance clipping. This framework provides a principled path toward low-bit PTQ for super-resolution and other Adam-dependent dense prediction tasks.
 
 \begin{thebibliography}{99}
 
