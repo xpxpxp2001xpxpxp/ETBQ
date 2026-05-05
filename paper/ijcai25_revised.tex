@@ -64,7 +64,7 @@ junbiao\_pang@bjut.edu.cn
 \maketitle
 
 \begin{abstract}
-Post-training quantization (PTQ) is an effective way to deploy deep neural networks on resource-constrained hardware, but its accuracy often collapses in extreme low-bit regimes. Existing PTQ methods mainly perform post-hoc reconstruction on a fixed full-precision model, implicitly assuming that the pre-trained model is already a quantization-friendly oracle. This assumption is fragile: a standard SGD-optimized model may lie in a sharp minimum whose loss increases rapidly under the discrete perturbations induced by weight and activation quantization. We propose \textbf{ETBQ} (\textbf{E}fficient \textbf{T}uning \textbf{B}efore \textbf{Q}uantization), a lightweight pre-conditioning framework that reshapes the full-precision loss landscape before PTQ is applied. ETBQ decouples the two dominant error sources. Weight Quantization Noise (WQN) models channel-wise weight quantization errors and injects temporally anti-correlated differential noise, yielding an asymptotically unbiased trajectory and an implicit Hessian-trace regularizer aligned with the target quantization grid. Activation Quantization Noise (AQN) models activation quantization errors and injects them through a salience-aware stochastic mask, improving robustness to high-variance activation perturbations without destabilizing training. Combined with stochastic weight averaging, ETBQ produces a quantization-friendly full-precision model that can be directly used by existing PTQ backends. Experiments on CIFAR-100, Tiny-ImageNet, and Cityscapes show consistent improvements over strong PTQ baselines, especially under W2A4 and W2A2 quantization. Code is publicly accessible at~\url{}.
+Post-training quantization (PTQ) is an effective way to deploy deep neural networks on resource-constrained hardware, but its accuracy often collapses in extreme low-bit regimes. Existing PTQ methods mainly perform post-hoc reconstruction on a fixed full-precision model, implicitly assuming that the pre-trained model is already a quantization-friendly oracle. This assumption is fragile: a standard SGD-optimized model may lie in a sharp minimum whose loss increases rapidly under the discrete perturbations induced by weight and activation quantization. We propose \textbf{ETBQ} (\textbf{E}fficient \textbf{T}uning \textbf{B}efore \textbf{Q}uantization), a lightweight pre-conditioning framework that reshapes the full-precision loss landscape before PTQ is applied. ETBQ decouples the two dominant error sources. Weight Quantization Noise (WQN) models channel-wise weight quantization errors and injects them through temporal differencing, controlling trajectory-level drift while inducing a quantization-aligned Hessian-trace regularization effect. Activation Quantization Noise (AQN) models activation quantization errors and injects them through a salience-aware stochastic mask, improving robustness to high-variance activation perturbations without destabilizing training. Combined with stochastic weight averaging, ETBQ produces a quantization-friendly full-precision model that can be directly used by existing PTQ backends. Experiments on CIFAR-100, Tiny-ImageNet, and Cityscapes show consistent improvements over strong PTQ baselines, especially under W2A4 and W2A2 quantization. Code is publicly accessible at~\url{https://github.com/xpxpxp2001xpxpxp/ETBQ}.
 \end{abstract}
 
 \section{Introduction}
@@ -110,7 +110,7 @@ Our main contributions are summarized as follows:
 \begin{itemize}
     \item We identify the sharpness of the FP loss landscape as a key bottleneck for extreme low-bit PTQ and provide a geometric explanation for why post-hoc reconstruction alone can be insufficient.
     \item We propose ETBQ, an efficient pre-tuning framework that decouples weight and activation quantization errors through WQN and AQN, thereby aligning flatness with the actual perturbation statistics of the target bit-width.
-    \item We provide a convergence analysis for the WQN-only update, showing that differential weight-noise injection optimizes a smoothed surrogate objective under standard non-convex stochastic optimization assumptions.
+\item We provide a convergence analysis for the WQN update, showing that temporal differential weight-noise injection can be analyzed as optimization over a smoothed surrogate objective under standard non-convex stochastic optimization assumptions.
     \item Extensive experiments on classification and semantic segmentation demonstrate that ETBQ consistently improves PTQ accuracy, especially in W2A4 and W2A2 settings.
 \end{itemize}
 
@@ -307,20 +307,40 @@ where $\boldsymbol{H}_y = \nabla^2_{\boldsymbol{y}}\mathcal{L}$ is the Hessian w
 \subsection{Efficiently Training a Neural Network}
 \label{sec:training}
 
-For classification, ETBQ optimizes the standard cross-entropy objective with label smoothing:
+ETBQ is a task-agnostic pre-conditioning framework. Its goal is not to replace the original task objective, but to optimize the full-precision model under statistically modeled quantization perturbations before PTQ is applied. For a minibatch $(\boldsymbol{x},y)\in\mathscr{D}_{t}$, let $\mathcal{L}_{task}(\cdot,\cdot)$ denote the task-specific training loss. For image classification, $\mathcal{L}_{task}$ is typically cross-entropy; for dense prediction tasks such as semantic segmentation, it can be the corresponding pixel-level supervision loss. ETBQ keeps this original supervision unchanged.
+
+During ETBQ tuning, the model is evaluated with temporarily perturbed weights and intermediate activations. Specifically, WQN constructs the perturbed weights $\boldsymbol{W}'$ by temporal differencing in Eq.~\eqref{eqt:diff_noise_def}, while AQN injects masked activation perturbations according to Eq.~\eqref{eqt:aqn_stoch_injection}. The general ETBQ objective is therefore written as
 \begin{equation}
 \label{eqt:main_loss}
-\mathcal{L} = \mathrm{CE}(f(\boldsymbol{x}'; \boldsymbol{W}'), y),
+    \mathcal{L}
+    =
+    \mathcal{L}_{task}
+    \left(
+    f(\boldsymbol{x};\boldsymbol{W}',\mathrm{AQN}),
+    y
+    \right),
 \end{equation}
-where $\boldsymbol{W}'$ and $\boldsymbol{x}'$ are the temporarily perturbed weights and activations produced by WQN and AQN. The perturbation strength is gradually increased during a warm-up period to avoid early training instability. During the final stage, SWA averages checkpoints along the noise-perturbed trajectory. Since SWA changes the effective weights, BatchNorm statistics are recomputed before the model is exported for PTQ.
+where $f(\boldsymbol{x};\boldsymbol{W}',\mathrm{AQN})$ denotes the forward pass using WQN-perturbed weights and AQN-perturbed intermediate activations.
+
+The perturbation strength $\lambda_e$ is gradually increased during training. This warm-up schedule avoids disrupting the full-precision model at the beginning of tuning and allows the network to progressively adapt to the target low-bit perturbation distribution. In the final stage, ETBQ applies Stochastic Weight Averaging (SWA) to aggregate the late-stage trajectory and obtain a solution closer to the center of a flat basin. Since SWA changes the effective network parameters, BatchNorm statistics are recomputed before exporting the model for PTQ.
+
+Algorithm~\ref{alg:etbq} summarizes the complete procedure. The output of ETBQ is still a full-precision model, but it has been pre-conditioned to be more robust to subsequent post-training quantization. Therefore, it can be directly combined with existing PTQ backends such as QDrop~\cite{wei-qdrop-arxiv-2022}.
 
 \section{Experiments}
 
 \subsection{Implementation Details}
 
-\textbf{Experimental Setup.} Experiments are conducted in PyTorch~\cite{paszke-pytorch-nips-2019} with MQBench~\cite{li-mqbench-arxiv-2021} as the quantization backend. We evaluate ETBQ on CIFAR-100~\cite{krizhevsky-cifar-arxiv-2009}, Tiny-ImageNet, and Cityscapes. For CIFAR-100, 100 training images are randomly sampled as the PTQ calibration set. Following common PTQ practice~\cite{wei-qdrop-arxiv-2022}, we use asymmetric uniform quantization by default, keep the first and last layers at 8-bit precision, quantize weights per channel, and quantize activations per layer. W$X$A$Y$ denotes $X$-bit weights and $Y$-bit activations.
+\textbf{Experimental Setup.}
+All experiments are implemented in PyTorch~\cite{paszke-pytorch-nips-2019}, with MQBench~\cite{li-mqbench-arxiv-2021} used as the PTQ backend. Unless otherwise specified, we apply asymmetric uniform quantization following QDrop~\cite{wei-qdrop-arxiv-2022}. We keep the first and last layers at 8-bit precision to avoid excessive information loss at the input and output boundaries. We use per-channel quantization for weights and per-tensor quantization for activations, consistent with the quantization-error modeling in Section~\ref{sec:method}. We use W$X$A$Y$ to denote $X$-bit weight and $Y$-bit activation quantization.
 
-\textbf{Training Protocol.} Unless otherwise specified, models are optimized with SGD, Nesterov momentum 0.9, batch size 64, and weight decay 0.001. The initial learning rate is 0.015 and follows cosine annealing. Label smoothing is set to 0.1. ETBQ injects quantization noise with a gradual warm-up, and SWA is activated in the final training stage.
+\textbf{PTQ Calibration.}
+For each dataset, the calibration set is randomly sampled from the corresponding training split and kept fixed for all compared PTQ methods. Unless otherwise stated, CIFAR-100~\cite{krizhevsky-cifar-arxiv-2009} uses 100 calibration images, Tiny-ImageNet uses 200 calibration images, and Cityscapes uses 128 calibration images. The same calibration samples are used for quantization to ensure a fair comparison.
+
+\textbf{ETBQ Pre-conditioning.}
+ETBQ is applied before PTQ as a lightweight full-precision pre-conditioning stage. During this stage, WQN and AQN statistics are estimated from the calibration set and updated during tuning as described in Section~\ref{sec:method}. After ETBQ tuning, the resulting full-precision model is passed to the same PTQ backend as the baselines. Therefore, the performance gain comes from improving the quantization-friendliness of the full-precision model rather than changing the PTQ reconstruction algorithm.
+
+\textbf{Evaluation Metrics.}
+For image classification on CIFAR-100 and Tiny-ImageNet, we report top-1 accuracy. For semantic segmentation on Cityscapes, we report mean Intersection-over-Union (mIoU). For each quantized model, we also report the performance drop relative to its corresponding FP32 model when appropriate.
 
 \begin{figure}[t]
     \centering
@@ -332,12 +352,14 @@ where $\boldsymbol{W}'$ and $\boldsymbol{x}'$ are the temporarily perturbed weig
 \subsection{Analysis of Our Approach}
 \label{sec:ablation}
 
+\textbf{Setting.}
+We conduct ablation studies on CIFAR-100 with ResNet-18 under the extreme W2A4 quantization setting. The baseline is a standard SGD-trained full-precision model followed by QDrop PTQ. ETBQ uses SGD with momentum 0.9, batch size 256, weight decay 0.0005, and an initial learning rate of 0.015 with cosine annealing. We train for 400 epochs. Noise injection starts at epoch 200 and linearly warms up for 50 epochs. SWA~\cite{DBLP:journals/corr/abs-1803-05407} is activated during the final 100 epochs. We use cross-entropy loss with label smoothing factor 0.1.
+
 \subsubsection{Ablation Study of the ETBQ Framework}
-We first evaluate the contribution of WQN, AQN, and SWA on CIFAR-100 with ResNet-18 under W2A4 quantization.
 
 \begin{table}[h]
 \centering
-\caption{Ablation study of the ETBQ framework. Results are reported as accuracy with W2A4 ResNet-18 on CIFAR-100.}
+\caption{Ablation study of ETBQ components on CIFAR-100 with W2A4 ResNet-18.}
 \label{tab:ablation_components}
 \begin{tabular}{ccc|ccc}
 \toprule
@@ -356,7 +378,9 @@ We first evaluate the contribution of WQN, AQN, and SWA on CIFAR-100 with ResNet
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:ablation_components} shows that WQN, AQN, and SWA each improve low-bit robustness. WQN alone improves W2A4 accuracy by +1.20\%, confirming the value of weight-side curvature regularization. AQN alone improves accuracy by +0.90\%, indicating that activation-side robustness is also essential. Combining WQN and AQN without SWA is less effective than WQN alone, consistent with the fact that simultaneous high-variance perturbations can create a turbulent optimization trajectory. The full ETBQ framework reaches 78.06\%, a +1.59\% improvement over the baseline, showing that SWA is important for consolidating the noisy trajectory into a stable flat basin.
+Table~\ref{tab:ablation_components} reports the contribution of WQN, AQN, and SWA. The baseline drops from 79.40\% to 76.47\% after W2A4 quantization. Individually, WQN, AQN, and SWA improve W2A4 accuracy to 77.67\%, 77.37\%, and 77.22\%, respectively, showing that weight-side smoothing, activation-side robustness, and trajectory averaging are all beneficial. WQN gives the largest single-component improvement, indicating that weight-side landscape pre-conditioning is especially important under low-bit PTQ.
+
+Combining WQN and AQN without SWA gives 77.43\%, which is lower than WQN alone. This suggests that jointly injecting heterogeneous perturbations can create a turbulent tuning trajectory. With SWA, the full ETBQ reaches 78.06\%, yielding a +1.59\% gain over the baseline. The result demonstrates that SWA effectively consolidates the noisy trajectory and is crucial for fully exploiting the benefits of WQN and AQN.
 
 \subsubsection{Effectiveness of Anti-correlated Errors}
 
@@ -396,7 +420,7 @@ Uniform Bernoulli         & 79.51                  & 77.17                  & +0
 
 As shown in Table~\ref{tab:ablation_masking}, uniform random masking already regularizes activation robustness, but salience-aware gating provides an additional +0.24\% gain. This supports the design choice of concentrating activation perturbations on channels with larger magnitudes, which are more vulnerable to clipping and quantization error.
 
-\subsection{Literature Comparison}
+\subsection{Comparison with State-of-the-Art PTQ Methods}
 \label{sec4.2}
 
 \begin{table}[t!]
@@ -438,7 +462,8 @@ As shown in Table~\ref{tab:ablation_masking}, uniform random masking already reg
 \end{table}
 
 \subsubsection{Image Classification on CIFAR-100.}
-We compare ETBQ with AdaRound~\cite{nagel-adaround-icml-2020}, BRECQ~\cite{li-brecq-arxiv-2021}, and QDrop~\cite{wei-qdrop-arxiv-2022}. Unlike these baselines, which perform post-hoc calibration on a fixed model, ETBQ first reshapes the FP model and then applies the PTQ backend.
+\textbf{Setting.}
+We evaluate ResNet-18, ResNet-50~\cite{he-resnet-cvpr-2016}, MobileNet-V1~\cite{howard-mbv1-arxiv-2017}, and MobileNet-V2~\cite{sandler-mbv2-cvpr-2018} on CIFAR-100. All PTQ methods use the same 100-image calibration set and the same quantization configuration. ETBQ uses QDrop as the PTQ backend after pre-conditioning. We compare against representative PTQ baselines including AdaRound~\cite{nagel-adaround-icml-2020}, BRECQ~\cite{li-brecq-arxiv-2021}, and QDrop~\cite{wei-qdrop-arxiv-2022}.
 
 Table~\ref{tab:sota_comparison_cifar100} shows that ETBQ consistently outperforms all baselines across architectures and bit-widths. In W4A4, ETBQ improves ResNet-50 over QDrop by +0.52\% and MobileNetV2 by +1.53\%. The gains are especially meaningful for lightweight networks, whose limited capacity makes them more sensitive to quantization-induced perturbations. In extreme W2A2, ETBQ also reduces the degradation from W4A4. For example, on ResNet-50, BRECQ drops by 7.91\% from W4A4 to W2A2 and QDrop drops by 6.98\%, whereas ETBQ drops by only 4.47\%. This supports the central claim that a wider FP basin better absorbs severe low-bit errors.
 
@@ -461,10 +486,14 @@ Table~\ref{tab:sota_comparison_cifar100} shows that ETBQ consistently outperform
 \end{table}
 
 \subsubsection{Comparisons on Tiny-ImageNet.}
-To evaluate whether ETBQ generalizes beyond CIFAR-100, we conduct experiments on Tiny-ImageNet. As shown in Table~\ref{tbl:tiny-imagenet}, ETBQ consistently improves ResNet-18. The advantage becomes larger as the bit-width decreases: the gain is +0.65\% in W4A4 and +2.14\% in both W2A4 and W2A2. This trend is consistent with our hypothesis that ETBQ is most beneficial when quantization perturbations are large enough for the geometry of the FP basin to become a limiting factor.
+\textbf{Setting.}
+To evaluate generalization beyond CIFAR-100, we conduct experiments on Tiny-ImageNet with ResNet-18. We sample 200 training images for PTQ calibration and report top-1 validation accuracy under FP32, W4A4, W2A4, and W2A2 settings.
+
+As shown in Table~\ref{tbl:tiny-imagenet}, ETBQ consistently improves ResNet-18 on Tiny-ImageNet. The gain is modest in FP32 and W4A4, but becomes larger in more aggressive settings. In W2A4 and W2A2, ETBQ improves top-1 accuracy by +2.14\%. This trend is consistent with our hypothesis that landscape pre-conditioning becomes increasingly important when quantization perturbations are large enough for the geometry of the full-precision basin to become a limiting factor.
 
 \subsubsection{Application to Semantic Segmentation.}
-We further apply ETBQ to semantic segmentation on Cityscapes with U-Net~\cite{ronneberger2015u}. Semantic segmentation is highly sensitive to spatial feature corruption, making it a challenging testbed for activation quantization robustness.
+\textbf{Setting.}
+We further evaluate ETBQ on semantic segmentation using U-Net~\cite{ronneberger2015u} on Cityscapes. We sample 128 training images for calibration and report mIoU on the validation set. Semantic segmentation is highly sensitive to spatial feature corruption, making it a challenging testbed for activation quantization robustness.
 
 \begin{table}[h!]
 \centering
@@ -484,7 +513,7 @@ We further apply ETBQ to semantic segmentation on Cityscapes with U-Net~\cite{ro
 }
 \end{table}
 
-Table~\ref{tbl:segment} shows that ETBQ improves all quantization settings. Notably, the W4A4 ETBQ model reaches 70.03\% mIoU, exceeding both the W4A4 SGD baseline and the full-precision SGD model. This indicates that the injected quantization noise can act as a useful regularizer for dense prediction. The large +5.80\% gain under W2A4 further demonstrates that landscape pre-conditioning benefits tasks beyond classification. The smaller gain under W2A2 suggests a practical boundary: when both weights and activations are quantized extremely aggressively, the perturbation may exceed the width of the learned flat basin.
+Table~\ref{tbl:segment} shows that ETBQ improves all quantization settings. Notably, the W4A4 ETBQ model reaches 70.03\% mIoU, exceeding both the W4A4 SGD baseline and the full-precision SGD model. This indicates that the injected quantization noise can act as a useful regularizer for dense prediction. The large +5.80\% gain under W2A4 further demonstrates that landscape pre-conditioning benefits tasks beyond classification. The smaller gain under W2A2 suggests a practical boundary: when both weights and activations are quantized extremely aggressively, the perturbation may exceed the robustness range learned by ETBQ.
 
 \section{Conclusion}
 
@@ -498,14 +527,14 @@ This paper studies low-bit PTQ from the perspective of loss-landscape geometry. 
 
 \appendix
 
-\section{Convergence Analysis of the WQN Update}
+\section{Convergence Analysis of the WQN Injection}
 \label{app:proof}
 
 We provide a convergence analysis for the weight-space component of ETBQ, namely the Weight Quantization Noise (WQN) update, under the standard framework of non-convex stochastic optimization. Let $\mathcal{L}(\boldsymbol{W})$ denote the task loss, and let us consider the Gaussian-smoothed surrogate objective
 \begin{equation}
-    \mathcal{L}_\sigma(\boldsymbol{W})=\mathbb{E}_{\boldsymbol{\delta}}[\mathcal{L}(\boldsymbol{W}+\boldsymbol{\delta})],
+    \mathcal{L}_\sigma(\boldsymbol{W})=\mathbb{E}_{\boldsymbol{P}}[\mathcal{L}(\boldsymbol{W}+\boldsymbol{P})],
 \end{equation}
-where $\boldsymbol{\delta}$ collects the effective weight quantization perturbations. The proof abstracts away specific architectural details and focuses on the stochastic gradients induced by the perturbation process.
+where $\boldsymbol{P}$ denotes the effective WQN perturbation. The proof abstracts away specific architectural details and focuses on the stochastic gradients induced by the perturbation process.
 
 \textbf{Assumption 1 (Gradient Lipschitz Continuity).}
 The smoothed objective $\mathcal{L}_\sigma(\boldsymbol{W})$ has $L_\sigma$-Lipschitz continuous gradients: for any $\boldsymbol{W}_1,\boldsymbol{W}_2$,
@@ -515,7 +544,7 @@ The smoothed objective $\mathcal{L}_\sigma(\boldsymbol{W})$ has $L_\sigma$-Lipsc
 This is a standard assumption in non-convex stochastic optimization. Gaussian smoothing motivates this assumption by reducing local irregularities and mitigating the non-smooth effects induced by quantization-like operators.
 
 \textbf{Assumption 2 (Boundedness from Below).}
-There exists $\mathcal{L}_\sigma^* > -\infty$ such that $\mathcal{L}_\sigma(\boldsymbol{W}) \geq \mathcal{L}_\sigma^*$ for all $\boldsymbol{W}$. For cross-entropy training, the loss is non-negative, so this condition inherently holds.
+There exists $\mathcal{L}_\sigma^* > -\infty$ such that $\mathcal{L}_\sigma(\boldsymbol{W}) \geq \mathcal{L}_\sigma^*$ for all $\boldsymbol{W}$. This is the standard lower-boundedness condition for task losses used in non-convex stochastic optimization.
 
 \textbf{Assumption 3 (Trajectory-Averaged Unbiasedness and Bounded Variance).}
 Let $\tilde{\boldsymbol{g}}_t$ be the stochastic gradient used by the algorithm at step $t$, and let $\boldsymbol{g}_t=\nabla \mathcal{L}_\sigma(\boldsymbol{W}_t)$. In practice, the statistical distribution of the quantization noise shifts as weights update, introducing a slight local bias. However, the differential mechanism utilizes the difference between consecutive steps to ensure that the time-averaged drift vanishes macroscopically by telescoping:
